@@ -1,20 +1,28 @@
 //! Hosting by the SCM. steward is registered as a per-user service template
 //! (`type= userown`); at each sign-in Windows starts an instance,
 //! `steward_<suffix>`, in the user's session and with the user's token. This
-//! module speaks the SCM's protocol and turns its controls into manager events.
+//! module speaks the SCM's protocol and turns its controls into the manager's.
+//!
+//! - Stop (an administrator, an upgrade): detach, leaving the services for
+//!   the next instance to adopt.
+//! - Shutdown, pre-shutdown, and the user's own session logging off: stop
+//!   every service, in order.
 
 use std::ffi::OsString;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use windows_service::service::{
-    ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
+    ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+    ServiceType, SessionChangeReason,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::{define_windows_service, service_dispatcher};
+use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 
 use crate::log::{error, info};
-use crate::manager::{self, Event};
+use crate::manager::{self, Control, KEY_WAKE};
+use crate::sys::port::Port;
 
 // Ignored for an own-process service, but it may not be empty.
 const DISPATCH_NAME: &str = "steward";
@@ -41,20 +49,39 @@ fn service_main(arguments: Vec<OsString>) {
     }
 }
 
+fn own_session() -> u32 {
+    let mut session = u32::MAX;
+    unsafe { ProcessIdToSessionId(std::process::id(), &mut session) };
+    session
+}
+
 fn host(name: &str) -> windows_service::Result<()> {
-    let (events, inbox) = mpsc::channel();
+    let port = Port::new().map_err(windows_service::Error::Winapi)?;
+    let waker = port.waker();
+    let session = own_session();
+    let (controls, inbox) = mpsc::channel();
     let handler = move |control: ServiceControl| -> ServiceControlHandlerResult {
-        let event = match control {
+        let message = match control {
             ServiceControl::Interrogate => return ServiceControlHandlerResult::NoError,
-            ServiceControl::Stop => Event::Stop("stop requested by the SCM".into()),
+            ServiceControl::Stop => Control::Detach("the SCM asked the instance to stop".into()),
             ServiceControl::Shutdown | ServiceControl::Preshutdown => {
-                Event::Stop("system shutdown".into())
+                Control::StopAll("the system is shutting down".into())
             }
-            ServiceControl::SessionChange(change) => Event::Session(format!("{:?}", change.reason)),
-            ServiceControl::PowerEvent(power) => Event::Power(format!("{power:?}")),
+            ServiceControl::SessionChange(change)
+                if change.reason == SessionChangeReason::SessionLogoff
+                    && change.notification.session_id == session =>
+            {
+                Control::StopAll("the user is signing out".into())
+            }
+            ServiceControl::SessionChange(change) => Control::Note(format!(
+                "session {}: {:?}",
+                change.notification.session_id, change.reason
+            )),
+            ServiceControl::PowerEvent(power) => Control::Note(format!("power: {power:?}")),
             _ => return ServiceControlHandlerResult::NotImplemented,
         };
-        let _ = events.send(event);
+        let _ = controls.send(message);
+        let _ = waker.post(KEY_WAKE, 0, 0);
         ServiceControlHandlerResult::NoError
     };
     let status = service_control_handler::register(name, handler)?;
@@ -63,6 +90,7 @@ fn host(name: &str) -> windows_service::Result<()> {
         current_state: ServiceState::Running,
         controls_accepted: ServiceControlAccept::STOP
             | ServiceControlAccept::SHUTDOWN
+            | ServiceControlAccept::PRESHUTDOWN
             | ServiceControlAccept::SESSION_CHANGE
             | ServiceControlAccept::POWER_EVENT,
         exit_code: ServiceExitCode::Win32(0),
@@ -71,9 +99,9 @@ fn host(name: &str) -> windows_service::Result<()> {
         process_id: None,
     };
     status.set_service_status(running.clone())?;
-    info!("running as the SCM service {name}");
+    info!("running as the SCM service {name}, session {session}");
 
-    manager::run(inbox);
+    manager::run(port, inbox);
 
     status.set_service_status(ServiceStatus {
         current_state: ServiceState::Stopped,

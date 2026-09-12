@@ -34,6 +34,21 @@ impl Outcome {
     }
 }
 
+impl std::fmt::Display for Outcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Outcome::Clean => write!(f, "exited cleanly"),
+            Outcome::ExitCode(code) => write!(f, "exited with code {code}"),
+            Outcome::Crashed(code) => write!(f, "crashed (exception 0x{code:08X})"),
+            Outcome::Vanished => write!(f, "all of its processes exited"),
+            Outcome::Timeout => write!(f, "timed out"),
+            Outcome::SpawnFailed => write!(f, "could not be started"),
+            Outcome::StartLimit => write!(f, "was started too often (StartLimitBurst=)"),
+            Outcome::Dependency => write!(f, "a unit it requires failed"),
+        }
+    }
+}
+
 /// The ending a process exit code describes.
 pub fn classify(code: u32) -> Outcome {
     // What a console program's default handler exits with on Ctrl+C: the stop

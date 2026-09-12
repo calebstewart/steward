@@ -38,18 +38,20 @@ pub fn init(console: bool) {
     sink.console = console;
 }
 
-pub fn write(level: &str, message: &str) {
+/// The local time, to the millisecond.
+pub fn timestamp() -> String {
     let mut t = SYSTEMTIME::default();
     unsafe { GetLocalTime(&mut t) };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds
+    )
+}
+
+pub fn write(level: &str, message: &str) {
     let line = format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03} {level:<5} [{}] {message}",
-        t.wYear,
-        t.wMonth,
-        t.wDay,
-        t.wHour,
-        t.wMinute,
-        t.wSecond,
-        t.wMilliseconds,
+        "{} {level:<5} [{}] {message}",
+        timestamp(),
         std::process::id()
     );
     let mut sink = SINK.lock().unwrap_or_else(|p| p.into_inner());

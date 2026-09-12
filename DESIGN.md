@@ -128,10 +128,19 @@ Not yet observed: what an instance receives at sign-out, and how long it has.
 
 1. **The SCM restarts the manager.** Failure actions on the template.
 2. **The manager's crash is not its services' crash.** Each service lives in a
-   named job object created *without* `KILL_ON_JOB_CLOSE`. The manager records
-   each service's job name, main PID and process creation time (PIDs are
-   reused; the pair is not) in a state file. A restarted manager re-opens the
-   jobs and adopts the processes instead of starting duplicates.
+   job object created *without* `KILL_ON_JOB_CLOSE`, so the jobs' processes
+   outlive the manager's handles. The manager records every process in each
+   job -- PID and creation time, since PIDs are reused and the pair is not --
+   and which is the main one, in `%LOCALAPPDATA%\steward\state.json`,
+   rewritten whenever a job's membership changes. A restarted manager opens
+   the recorded processes that are still the same processes and puts them in
+   a new job, which Windows nests inside the orphaned one; it adopts them
+   instead of starting duplicates.
+
+   The first design named the jobs and re-opened them by name. That does not
+   work: a job's name goes with its last handle, even while its processes run
+   on (verified 2026-09-12: `OpenJobObject` fails with error 2 once the
+   creating process has closed its handle).
 3. **The manager restarts services.** `Restart=`, `RestartSec=` with backoff,
    and `StartLimitBurst=`/`StartLimitIntervalSec=`; a service that exhausts its
    limit is `failed`, shown as such, and stays down until started again.
@@ -157,22 +166,47 @@ Not yet observed: what an instance receives at sign-out, and how long it has.
   its children are the user's. `KillMode=control-group` (the default) tracks
   the tree.
 - **The stop ladder.** Windows has no SIGTERM. In order: `ExecStop=` if given
-  (`komorebic stop`, `thide stop`); Ctrl+Break for console programs (each is
-  started in its own process group); `WM_CLOSE` to the top-level windows of GUI
-  programs; after `TimeoutStopSec=`, terminate the job.
+  (`komorebic stop`, `thide stop`); Ctrl+C to the job's consoles and
+  `WM_CLOSE` to its processes' top-level windows; after `TimeoutStopSec=`,
+  terminate the job. Ctrl+C can only be sent from a process attached to the
+  target's console, and attaching would cost the manager its own, so a helper
+  does it (`steward --ctrl-c <pid>...`). Every process on a console hears it,
+  including `KillMode=process` children that share their parent's console; a
+  program started with `start /b` ignores it and is terminated at the timeout.
+- **Processes are created in their job** (`PROC_THREAD_ATTRIBUTE_JOB_LIST`), so
+  nothing escapes in the instant before assignment, and inherit exactly two
+  handles (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`): NUL for stdin and the unit's
+  log for stdout and stderr. Jobs have `DIE_ON_UNHANDLED_EXCEPTION`, so a
+  crash ends the process at once instead of waiting on an error-reporting
+  dialog.
 - **No console windows.** Console programs are started with `CREATE_NO_WINDOW`
-  and their stdout/stderr piped to the manager -- no `conhost --headless`, and
-  no Windows Terminal window from the default-terminal handoff. A pseudoconsole
-  mode can come later for programs that behave differently without a terminal.
+  -- no `conhost --headless`, and no Windows Terminal window from the
+  default-terminal handoff. Their console host lives in the job too and
+  outlasts the program by a few milliseconds, which the manager allows for
+  before deciding the program left something behind. A pseudoconsole mode can
+  come later for programs that behave differently without a terminal.
+- **One thread, one completion port.** Process exits (thread-pool waits on
+  the process handles), job notifications, and the SCM's or the console's
+  controls all arrive as packets on one port; deadlines are the wait's
+  timeout. Job notifications are not guaranteed by Windows, so the manager
+  also checks each job's process count at least once a second.
 
 ## Logs
 
-A per-user journal under `%LOCALAPPDATA%\steward\logs`: append-only, rotated,
-one record per line of service output (time, unit, invocation, PID, stream)
-interleaved with the manager's own records (started, exited with code N,
-restarting in 5 s, failed). `stewctl logs [-f] <unit>` reads it through the
-manager. The Windows Event Log needs an administrator to register a source;
-it may carry state transitions later, installed with the template.
+Each unit's stdout and stderr go straight to
+`%LOCALAPPDATA%\steward\logs\<unit>.log` through a handle the service's
+processes inherit, not through a pipe to the manager: a manager crash cannot
+break a service's output (a Rust program that `println!`s into a closed pipe
+panics). The manager writes its own lines for the unit -- started, exited
+with code N, restarting in 5 s, failed -- into the same file, marked
+`-- <time> steward:`. A log over 8 MiB is set aside as `<unit>.log.1` when the
+unit next starts. The manager's own log is `%LOCALAPPDATA%\steward\steward.log`.
+
+`stewctl logs [-f] <unit>` reads the files directly, so it works with the
+manager down. The price of files over a pipe is that service output carries
+no timestamps of its own. The Windows Event Log needs an administrator to
+register a source; it may carry state transitions later, installed with the
+template.
 
 ## Control plane
 
@@ -268,8 +302,11 @@ build remaps them.
 - **M0** -- this repository: design, the unit-file parser, a manager that
   runs as a per-user service (or in a console) and loads its units, a CLI that
   checks unit files, the flake.
-- **M1** -- supervision: job objects, restart policy, stop ladder, state file
-  and re-adoption, the graphical-session stage.
+- **M1** (done) -- supervision: job objects, restart policy, stop ladder,
+  state file and re-adoption, the graphical-session stage. Exercised in
+  `--console` mode with throwaway units: ordering, crash backoff, forking
+  services, `KillMode=process`, a stop that needs the kill, and adoption of
+  every service by a manager started after the first was killed.
 - **M2** -- control plane and journal: the pipe, `stewctl` verbs, logs.
 - **M3** -- winpkgs integration: the service resource in winpkgs, the two
   modules, activation hooks.
@@ -283,7 +320,11 @@ build remaps them.
   since `%VAR%` expansion belongs to cmd, not to `CreateProcess`. Undecided;
   v1 passes `%` through untouched.
 - **Sign-out.** What the instance is sent (stop? shutdown? session change?)
-  and the time it has to stop services in order.
+  and the time it has to stop services in order. For now: the SCM's Stop
+  detaches (as for an upgrade), and a logoff session change for the manager's
+  own session, shutdown and pre-shutdown stop everything in order. The
+  manager logs every control it receives, so the first real sign-out answers
+  the question.
 - **After the failure actions run out.** Whether the SCM repeats the last
   action or gives up, and so how many to register.
 - **Readiness.** Whether any Windows program is worth a `Type=notify`
