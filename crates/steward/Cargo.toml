@@ -1,0 +1,20 @@
+[package]
+name = "steward"
+description = "A per-user service manager for Windows, hosted by the SCM as a per-user service"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+steward-unit.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_SystemInformation",
+]

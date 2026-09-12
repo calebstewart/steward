@@ -1,0 +1,10 @@
+[package]
+name = "stewctl"
+description = "Control steward, the per-user service manager for Windows"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+steward-unit.workspace = true
+clap = { version = "4", features = ["derive"] }
