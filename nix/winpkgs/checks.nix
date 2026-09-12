@@ -49,6 +49,14 @@ let
           Unit.Description = "Tiling window management";
           Install.WantedBy = [ "graphical-session.target" ];
         };
+        systemd.user.timers.backup = {
+          Unit.Description = "Nightly backup";
+          Timer = {
+            OnCalendar = "*-*-* 03:00";
+            Persistent = true;
+          };
+          Install.WantedBy = [ "timers.target" ];
+        };
       }
     ];
   };
@@ -59,6 +67,19 @@ let
 
     [Unit]
     Description=Tiling window management
+  '';
+
+  # A boolean as home-manager writes it, which steward reads as systemd does.
+  expectedTimer = pkgs.writeText "backup.timer" ''
+    [Install]
+    WantedBy=timers.target
+
+    [Timer]
+    OnCalendar=*-*-* 03:00
+    Persistent=true
+
+    [Unit]
+    Description=Nightly backup
   '';
 
   # The same home with whkd's unit changed: its switch must run again.
@@ -139,6 +160,10 @@ in
         target=$(jq -r '.resources[] | select(.type == "winpkgs/file" and .properties.target == "%APPDATA%/steward/units/tiling.target") | .properties.source' <<<"$doc")
         diff -u ${expectedTarget} "$closure/$target"
         test "$(jq '[.resources[] | select(.id | test("tray"))] | length' <<<"$doc")" = 0
+
+        # A timer is written too.
+        timer=$(jq -r '.resources[] | select(.type == "winpkgs/file" and .properties.target == "%APPDATA%/steward/units/backup.timer") | .properties.source' <<<"$doc")
+        diff -u ${expectedTimer} "$closure/$timer"
 
         test "$(jq '[.resources[] | select(.type == "winpkgs/file" and (.id | test("steward")))] | length' <<<"$bareDoc")" = 0
 

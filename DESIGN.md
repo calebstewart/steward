@@ -455,9 +455,10 @@ home-manager runs on systemd, and has nothing to enable.
   control 128: the old manager hands its services over, and the instance
   starts again from the same path, as the new manager, which adopts them.
 - **`windowsModules.home`** writes home-manager's own
-  `systemd.user.services` and `systemd.user.targets` as unit files in
-  `%APPDATA%\steward\units` -- all but the targets steward has built in,
-  among them the `tray.target` home-manager declares everywhere.
+  `systemd.user.services`, `systemd.user.targets` and `systemd.user.timers`
+  as unit files in `%APPDATA%\steward\units` -- all but the targets steward
+  has built in, among them the `tray.target` home-manager declares
+  everywhere.
   winpkgs evaluates home-manager's modules, so the option is there, and on
   Windows home-manager's systemd module is off, its units going nowhere.
   Units are free-form `Section.Key` attributes rendered as home-manager
@@ -508,8 +509,8 @@ build remaps them.
   the bars came up before komorebi listened, failed, and were restarted a
   second later.
 - **M5** (done) -- timers: `*.timer` files, `OnCalendar=` and the relative
-  triggers, `Persistent=`, `stewctl list-timers`. Exercised against a
-  `--console` manager: calendar,
+  triggers, `Persistent=`, `stewctl list-timers`, and a home's
+  `systemd.user.timers`. Exercised against a `--console` manager: calendar,
   one-shot and chained timers elapsing, a persistent timer making up a
   night it missed, a sign-in timer due at once, a timer that stops once
   spent, a manager killed and replaced (every schedule kept, a missed elapse
