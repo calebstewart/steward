@@ -5,6 +5,7 @@ members = ["crates/steward-unit", "crates/steward", "crates/stewctl"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 publish = false
 
 [workspace.dependencies]

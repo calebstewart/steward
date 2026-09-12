@@ -41,6 +41,7 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "A per-user service manager for Windows";
     homepage = "https://github.com/calebstewart/steward";
+    license = lib.licenses.mit;
     platforms = lib.platforms.windows;
     mainProgram = "stewctl";
   };

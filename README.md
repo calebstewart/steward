@@ -40,3 +40,7 @@ cargo run -p stewctl -- verify
 ```
 
 checks every unit file in that directory.
+
+## License
+
+MIT; see [LICENSE](LICENSE).
