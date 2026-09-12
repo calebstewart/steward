@@ -1,0 +1,8 @@
+[package]
+name = "steward-unit"
+description = "Unit files in systemd's syntax, read the way steward reads them on Windows"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]

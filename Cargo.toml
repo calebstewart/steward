@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/steward-unit"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+steward-unit = { path = "crates/steward-unit" }
