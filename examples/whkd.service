@@ -2,15 +2,17 @@
 # terminals and the like; KillMode=process leaves those running when whkd is
 # stopped or restarted, since they are the user's and not the service's.
 # Whatever starts whkd today (a Run key, the Startup folder) must not also start
-# it, or the second copy cannot register the hotkeys.
+# it, or the second copy cannot register the hotkeys. It is part of
+# tiling.target, which starts and stops it with the rest of the tiling stack.
 
 [Unit]
 Description=Hotkey daemon
 After=graphical-session.target
+PartOf=tiling.target
 
 [Service]
 ExecStart="C:\Program Files\whkd\bin\whkd.exe"
 KillMode=process
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=tiling.target

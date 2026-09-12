@@ -19,7 +19,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use steward_ipc::{ManagerStatus, Request, Response, UnitStatus};
-use steward_supervisor::plan::{DEFAULT_TARGET, GRAPHICAL_TARGET};
+use steward_supervisor::plan::{DEFAULT_TARGET, GRAPHICAL_TARGET, TRAY_TARGET};
 use steward_supervisor::{
     Action, Decision, Event as UnitEvent, Machine, Outcome, Plan, Process, Progress, State,
 };
@@ -268,10 +268,8 @@ impl Manager {
                 }
             }
             Request::Stop { units } => {
-                for (name, slot) in units.into_iter().zip(slots) {
-                    self.to_start.remove(&name);
-                    self.feed(slot, UnitEvent::Stop);
-                    messages.push(format!("{name}: stopping"));
+                for name in units {
+                    messages.extend(self.stop_with_bound(&name));
                 }
             }
             Request::Restart { .. } => {
@@ -311,13 +309,52 @@ impl Manager {
         messages
     }
 
+    /// Stop `name`, and what requires it or is part of it -- as a stop asked
+    /// for does in systemd.
+    fn stop_with_bound(&mut self, name: &str) -> Vec<String> {
+        let mut messages = Vec::new();
+        let bound = self.plan.bound_to(name);
+        for unit in std::iter::once(name.to_owned()).chain(bound) {
+            let Some(slot) = self.slot(&unit) else {
+                continue;
+            };
+            self.to_start.remove(&unit);
+            if unit != name && self.units[slot].resting() {
+                continue;
+            }
+            self.feed(slot, UnitEvent::Stop);
+            messages.push(if unit == name {
+                format!("{unit}: stopping")
+            } else {
+                format!("{unit}: stopping, with {name}")
+            });
+        }
+        messages
+    }
+
+    /// Restart a unit, and what requires it or is part of it and runs.
     fn restart(&mut self, slot: usize) -> Vec<String> {
+        let name = self.units[slot].name.clone();
+        let mut messages = self.restart_one(slot);
+        for unit in self.plan.bound_to(&name) {
+            match self.slot(&unit) {
+                Some(bound) if !self.units[bound].resting() => {
+                    messages.extend(self.restart_one(bound));
+                }
+                _ => {}
+            }
+        }
+        messages
+    }
+
+    fn restart_one(&mut self, slot: usize) -> Vec<String> {
         let name = self.units[slot].name.clone();
         if self.units[slot].resting() {
             return self.start_with_dependencies(&name);
         }
         // A running unit restarts through its stop: the machine starts it
-        // again once the stop is done, with its newest definition.
+        // again once the stop is done, with its newest definition. (A target
+        // is stopped and started at once.)
         self.feed(slot, UnitEvent::Stop);
         self.feed(slot, UnitEvent::Start);
         vec![format!("{name}: restarting")]
@@ -401,7 +438,11 @@ impl Manager {
                 let Some(slot) = self.slot(name) else {
                     continue;
                 };
-                if !self.units[slot].resting() {
+                // A target took its new definition at once, and restarting
+                // it would restart what is part of it: an edited description
+                // is no reason to bounce a whole group.
+                let unit = &self.units[slot];
+                if !unit.resting() && !unit.machine.service().is_target() {
                     messages.extend(self.restart(slot));
                 }
             }
@@ -548,6 +589,16 @@ impl Manager {
                 .adopt(pid.is_some(), Instant::now());
             self.carry_out(slot, actions);
         }
+        for name in saved.targets {
+            let Some(slot) = self
+                .slot(&name)
+                .filter(|&s| self.units[s].machine.service().is_target())
+            else {
+                continue;
+            };
+            self.units[slot].machine.adopt(false, Instant::now());
+            info!("{name}: active, as it was");
+        }
         self.dirty = true;
     }
 
@@ -643,7 +694,7 @@ impl Manager {
     fn reached(&self, target: &str) -> bool {
         match target {
             DEFAULT_TARGET => true,
-            GRAPHICAL_TARGET => self.graphical,
+            GRAPHICAL_TARGET | TRAY_TARGET => self.graphical,
             _ => false,
         }
     }
@@ -824,6 +875,12 @@ impl Manager {
         }
         let before = self.units[slot].machine.state();
         let actions = self.units[slot].machine.handle(event, Instant::now());
+        // A target's state is all a next manager has to go on.
+        if self.units[slot].machine.service().is_target()
+            && self.units[slot].machine.state() != before
+        {
+            self.dirty = true;
+        }
         // Before the actions: their replies report the transitions they cause.
         self.report(slot, before);
         self.carry_out(slot, actions);
@@ -1114,6 +1171,12 @@ impl Manager {
                 .units
                 .insert(unit.name.clone(), SavedUnit { main, processes });
         }
+        saved.targets = self
+            .units
+            .iter()
+            .filter(|u| u.machine.service().is_target() && u.machine.state() == State::Active)
+            .map(|u| u.name.clone())
+            .collect();
         if let Err(e) = state::save(&path, &saved) {
             error!("cannot save the state to {}: {e}", path.display());
         }

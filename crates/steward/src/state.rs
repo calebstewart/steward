@@ -1,5 +1,6 @@
 //! What a restarted manager needs to take its services back: for each running
-//! service, every process in its job and which of them is the main one.
+//! service, every process in its job and which of them is the main one; and
+//! which targets were active.
 //! Written on every change to `%LOCALAPPDATA%\steward\state-<session>.json` (a
 //! temporary file renamed over the old, so a crash mid-write leaves the
 //! previous state rather than half of one), and removed when nothing is left
@@ -15,6 +16,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Saved {
     pub units: BTreeMap<String, SavedUnit>,
+    /// The targets that were active. They have no processes to find again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,7 +51,7 @@ pub fn load(path: &Path) -> Result<Saved, String> {
 /// Record `saved`; with nothing running there is nothing to record, and the
 /// file goes.
 pub fn save(path: &Path, saved: &Saved) -> io::Result<()> {
-    if saved.units.is_empty() {
+    if saved.units.is_empty() && saved.targets.is_empty() {
         return match std::fs::remove_file(path) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -91,6 +95,15 @@ mod tests {
         );
         save(&file, &saved).unwrap();
         assert_eq!(load(&file).unwrap(), saved);
+        // A state from before targets were saved still loads.
+        std::fs::write(&file, r#"{"units":{}}"#).unwrap();
+        assert_eq!(load(&file).unwrap(), Saved::default());
+        let targets = Saved {
+            targets: vec!["tiling.target".into()],
+            ..Saved::default()
+        };
+        save(&file, &targets).unwrap();
+        assert_eq!(load(&file).unwrap(), targets);
         // Nothing running: no file, and none needed to say so.
         save(&file, &Saved::default()).unwrap();
         assert!(!file.exists());

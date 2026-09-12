@@ -1,5 +1,11 @@
-//! A `.service` unit: the keys steward understands, their defaults, and a
+//! A unit file: the keys steward understands, their defaults, and a
 //! diagnostic for everything else.
+//!
+//! A `.service` runs something. A `.target` runs nothing: it is `[Unit]` and
+//! `[Install]` only, a name units can be `WantedBy=`, ordered `After=`, and
+//! `PartOf=`, so that starting or stopping it starts or stops them. Both are
+//! a [`Service`], told apart by its [`UnitKind`]. `default.target`,
+//! `graphical-session.target` and `tray.target` are steward's own.
 //!
 //! Assignment follows systemd: a scalar key takes its last value; a list key
 //! (`After=`, `Environment=`, `ExecStartPre=`, ...) accumulates, and an empty
@@ -59,6 +65,24 @@ impl fmt::Display for Diagnostic {
     }
 }
 
+/// Reached as soon as the manager is up, at sign-in.
+pub const DEFAULT_TARGET: &str = "default.target";
+/// Reached once the shell is ready: Explorer's taskbar exists.
+pub const GRAPHICAL_TARGET: &str = "graphical-session.target";
+/// home-manager's name for "the tray is there", which on Windows is when the
+/// taskbar is: another name for `graphical-session.target`.
+pub const TRAY_TARGET: &str = "tray.target";
+/// The targets steward reaches itself; no unit file may be one of them.
+pub const BUILTIN_TARGETS: [&str; 3] = [DEFAULT_TARGET, GRAPHICAL_TARGET, TRAY_TARGET];
+
+/// A service, or a target: a unit that runs nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnitKind {
+    #[default]
+    Service,
+    Target,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ServiceType {
     /// The service is up as soon as its process is created.
@@ -102,16 +126,21 @@ pub struct Command {
     pub ignore_failure: bool,
 }
 
+/// A unit: a service, or a target, which has the `[Unit]` and `[Install]`
+/// fields and nothing to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Service {
-    /// The unit's name, `whkd.service`.
+    /// The unit's name, `whkd.service` or `tiling.target`.
     pub name: String,
+    pub kind: UnitKind,
     pub description: Option<String>,
     pub documentation: Vec<String>,
     pub after: Vec<String>,
     pub before: Vec<String>,
     pub wants: Vec<String>,
     pub requires: Vec<String>,
+    /// Stopping or restarting any of these stops or restarts this unit too.
+    pub part_of: Vec<String>,
     pub start_limit_burst: u32,
     pub start_limit_interval: Duration,
 
@@ -138,15 +167,21 @@ pub struct Service {
 }
 
 impl Service {
-    fn new(name: &str) -> Self {
+    pub fn is_target(&self) -> bool {
+        self.kind == UnitKind::Target
+    }
+
+    fn new(name: &str, kind: UnitKind) -> Self {
         Service {
             name: name.to_owned(),
+            kind,
             description: None,
             documentation: Vec::new(),
             after: Vec::new(),
             before: Vec::new(),
             wants: Vec::new(),
             requires: Vec::new(),
+            part_of: Vec::new(),
             start_limit_burst: 5,
             start_limit_interval: Duration::from_secs(10),
             service_type: ServiceType::Simple,
@@ -168,7 +203,7 @@ impl Service {
     }
 }
 
-/// The result of reading a unit: the service, unless a diagnostic is an error.
+/// The result of reading a unit: the unit, unless a diagnostic is an error.
 #[derive(Debug, Clone)]
 pub struct Parsed {
     pub service: Option<Service>,
@@ -183,7 +218,8 @@ impl Parsed {
     }
 }
 
-/// Read `text` as the unit called `name` (its file name, `whkd.service`).
+/// Read `text` as the unit called `name` -- its file name, `whkd.service` or
+/// `tiling.target`, which says which kind of unit it is.
 pub fn parse_service(name: &str, text: &str) -> Parsed {
     let mut reader = Reader {
         diagnostics: Vec::new(),
@@ -230,16 +266,31 @@ impl Reader {
     }
 
     fn service(&mut self, name: &str, file: &UnitFile) -> Option<Service> {
-        if !name.ends_with(".service") {
-            self.error(0, format!("{name:?} is not a .service unit"));
+        let kind = if name.ends_with(".target") {
+            UnitKind::Target
+        } else {
+            if !name.ends_with(".service") {
+                self.error(0, format!("{name:?} is not a .service or .target unit"));
+            }
+            UnitKind::Service
+        };
+        if BUILTIN_TARGETS.contains(&name) {
+            self.error(
+                0,
+                format!("{name} is steward's own target; name yours otherwise"),
+            );
         }
-        let mut s = Service::new(name);
+        let mut s = Service::new(name, kind);
         for section in &file.sections {
             match section.name.as_str() {
                 "Unit" => section
                     .entries
                     .iter()
                     .for_each(|e| self.unit_key(&mut s, e)),
+                "Service" if kind == UnitKind::Target => self.error(
+                    section.line,
+                    "a target runs nothing; it has no [Service] section",
+                ),
                 "Service" => section
                     .entries
                     .iter()
@@ -267,6 +318,7 @@ impl Reader {
             "Before" => list(&mut s.before, &e.value),
             "Wants" => list(&mut s.wants, &e.value),
             "Requires" => list(&mut s.requires, &e.value),
+            "PartOf" => list(&mut s.part_of, &e.value),
             "StartLimitBurst" => self.number(e, &mut s.start_limit_burst),
             "StartLimitIntervalSec" => self.span(e, &mut s.start_limit_interval),
             _ => self.unknown(e, "Unit"),
@@ -362,6 +414,9 @@ impl Reader {
     }
 
     fn validate(&mut self, s: &Service) {
+        if s.is_target() {
+            return;
+        }
         match (s.exec_start.len(), s.service_type) {
             _ if self.bad_exec_start => {}
             (0, _) => self.error(0, "no ExecStart= (a service needs a command to run)"),
@@ -731,8 +786,42 @@ WantedBy=graphical-session.target
     }
 
     #[test]
-    fn the_name_must_be_a_service() {
+    fn the_name_must_be_a_service_or_a_target() {
         assert!(parse_service("t.timer", "[Service]\nExecStart=x\n").has_errors());
+    }
+
+    #[test]
+    fn a_target_is_unit_and_install_only() {
+        let parsed = parse_service(
+            "tiling.target",
+            "[Unit]\nDescription=Tiling\nWants=komorebi.service whkd.service\nAfter=graphical-session.target\n[Install]\nWantedBy=graphical-session.target\n",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let t = parsed.service.unwrap();
+        assert!(t.is_target());
+        assert_eq!(t.wants, ["komorebi.service", "whkd.service"]);
+        assert_eq!(t.wanted_by, ["graphical-session.target"]);
+        assert!(t.exec_start.is_empty());
+
+        let with_service = parse_service("t.target", "[Service]\nExecStart=x\n");
+        assert_eq!(
+            with_service.diagnostics[0].to_string(),
+            "line 1: error: a target runs nothing; it has no [Service] section"
+        );
+    }
+
+    #[test]
+    fn steward_s_own_targets_are_not_files() {
+        for name in BUILTIN_TARGETS {
+            assert!(parse_service(name, "[Unit]\n").has_errors(), "{name}");
+        }
+    }
+
+    #[test]
+    fn part_of() {
+        let s = ok("[Unit]\nPartOf=tiling.target\n[Service]\nExecStart=x\n");
+        assert_eq!(s.part_of, ["tiling.target"]);
+        assert!(!s.is_target());
     }
 
     #[test]

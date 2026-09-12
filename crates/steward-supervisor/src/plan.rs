@@ -1,17 +1,28 @@
-//! Which units start when, and in what order.
+//! Which units start when, and in what order, and what stops with what.
 //!
-//! Two targets are built in. `default.target` is reached as soon as the
+//! Three targets are built in. `default.target` is reached as soon as the
 //! manager is up, at sign-in. `graphical-session.target` is reached once the
 //! shell is ready -- Explorer's taskbar exists -- which the manager finds out
 //! for itself; before that there are no windows to manage and no tray to sit
-//! in. A unit is started when a target it is `WantedBy=` is reached, along with
-//! everything it `Wants=` or `Requires=`.
+//! in. `tray.target` is another name for it. A unit is started when a target
+//! it is `WantedBy=` is reached, along with everything it `Wants=` or
+//! `Requires=`.
+//!
+//! Any other target is a unit file of its own, a unit that runs nothing, and
+//! in the plan it is a unit like any other: `WantedBy=` it is its `Wants=`,
+//! so starting it starts what it wants, and ordering after it is ordering
+//! after a unit.
 //!
 //! Ordering is `After=`/`Before=`: a unit waits while anything it is ordered
 //! after is still waiting or on its way up (a unit waiting out a restart
 //! delay counts as on its way up). `Requires=` adds that the unit fails,
-//! rather than starts, when what it requires has failed. Stopping everything
-//! (sign-out) runs the order backwards.
+//! rather than starts, when what it requires has failed -- or waits, for a
+//! built-in target not reached yet. Stopping everything (sign-out) runs the
+//! order backwards.
+//!
+//! Stopping or restarting a unit on purpose does the same to what
+//! `Requires=` it or is `PartOf=` it, as systemd propagates them; what it
+//! merely `Wants=` is left alone.
 //!
 //! A unit that is up and in its steady state, a oneshot that finished, or one
 //! that failed has settled; an ordering cycle is broken by starting (or
@@ -19,13 +30,25 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use steward_unit::Service;
+use steward_unit::{Service, BUILTIN_TARGETS};
+pub use steward_unit::{DEFAULT_TARGET, GRAPHICAL_TARGET, TRAY_TARGET};
 
 use crate::machine::State;
 
-pub const DEFAULT_TARGET: &str = "default.target";
-pub const GRAPHICAL_TARGET: &str = "graphical-session.target";
-const TARGETS: [&str; 2] = [DEFAULT_TARGET, GRAPHICAL_TARGET];
+/// Reached by the manager, not started: `default.target`,
+/// `graphical-session.target`, and `tray.target` (which is the latter).
+fn is_builtin(name: &str) -> bool {
+    BUILTIN_TARGETS.contains(&name)
+}
+
+/// The name a unit's dependency means: `tray.target` is the shell's.
+fn canonical(name: &str) -> String {
+    if name == TRAY_TARGET {
+        GRAPHICAL_TARGET.to_owned()
+    } else {
+        name.to_owned()
+    }
+}
 
 /// Where a unit is, as far as ordering cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +100,8 @@ struct Node {
     after: BTreeSet<String>,
     wants: BTreeSet<String>,
     requires: BTreeSet<String>,
+    part_of: BTreeSet<String>,
+    /// Built-in targets only: a custom target's `WantedBy=` is its `Wants=`.
     wanted_by: BTreeSet<String>,
 }
 
@@ -85,56 +110,74 @@ pub struct Plan {
     nodes: BTreeMap<String, Node>,
 }
 
-fn is_target(name: &str) -> bool {
-    name.ends_with(".target")
+fn names(list: &[String]) -> BTreeSet<String> {
+    list.iter().map(|n| canonical(n)).collect()
 }
 
 impl Plan {
-    /// The plan for these services, and a warning for each dependency that
-    /// leads nowhere.
+    /// The plan for these units -- services and targets -- and a warning for
+    /// each dependency that leads nowhere.
     pub fn new<'a>(services: impl IntoIterator<Item = &'a Service>) -> (Plan, Vec<String>) {
         let services: Vec<&Service> = services.into_iter().collect();
         let mut nodes: BTreeMap<String, Node> = services
             .iter()
             .map(|s| {
                 let node = Node {
-                    after: s.after.iter().cloned().collect(),
-                    wants: s.wants.iter().cloned().collect(),
-                    requires: s.requires.iter().cloned().collect(),
-                    wanted_by: s.wanted_by.iter().cloned().collect(),
+                    after: names(&s.after),
+                    wants: names(&s.wants),
+                    requires: names(&s.requires),
+                    part_of: names(&s.part_of),
+                    wanted_by: names(&s.wanted_by)
+                        .into_iter()
+                        .filter(|t| is_builtin(t))
+                        .collect(),
                 };
                 (s.name.clone(), node)
             })
             .collect();
-        // `Before=` is `After=` seen from the other side.
         for s in &services {
-            for later in &s.before {
-                if let Some(node) = nodes.get_mut(later) {
+            // `Before=` is `After=` seen from the other side.
+            for later in names(&s.before) {
+                if let Some(node) = nodes.get_mut(&later) {
                     node.after.insert(s.name.clone());
+                }
+            }
+            // A unit `WantedBy=` a unit of the plan -- a target of the user's
+            // -- is one it wants.
+            for wanter in names(&s.wanted_by) {
+                if let Some(node) = nodes.get_mut(&wanter) {
+                    node.wants.insert(s.name.clone());
                 }
             }
         }
 
         let mut warnings = Vec::new();
-        for (name, node) in &nodes {
-            for target in node.after.iter().chain(&node.wanted_by) {
-                if is_target(target) && !TARGETS.contains(&target.as_str()) {
+        let exists = |n: &str| nodes.contains_key(n) || is_builtin(n);
+        for s in &services {
+            let name = &s.name;
+            for target in names(&s.after).iter().chain(&names(&s.wanted_by)) {
+                if target.ends_with(".target") && !exists(target) {
                     warnings.push(format!(
-                        "{name}: {target} is not a target steward has (it has {})",
-                        TARGETS.join(" and ")
+                        "{name}: {target} is neither steward's ({}) nor a unit file",
+                        BUILTIN_TARGETS.join(", ")
                     ));
                 }
             }
-            for wanted in &node.wants {
-                if !nodes.contains_key(wanted) {
+            for wanted in names(&s.wants) {
+                if !exists(&wanted) {
                     warnings.push(format!("{name}: wants {wanted}, which does not exist"));
                 }
             }
-            for required in &node.requires {
-                if !nodes.contains_key(required) {
+            for required in names(&s.requires) {
+                if !exists(&required) {
                     warnings.push(format!(
                         "{name}: requires {required}, which does not exist; it will not start"
                     ));
+                }
+            }
+            for whole in names(&s.part_of) {
+                if !exists(&whole) {
+                    warnings.push(format!("{name}: part of {whole}, which does not exist"));
                 }
             }
         }
@@ -159,6 +202,24 @@ impl Plan {
     /// `unit` and what it wants or requires, and so on.
     pub fn with_dependencies(&self, unit: &str) -> BTreeSet<String> {
         self.closure([unit.to_owned()])
+    }
+
+    /// What stopping or restarting `unit` on purpose also stops or restarts:
+    /// the units that require it or are part of it, and so on. Not `unit`.
+    pub fn bound_to(&self, unit: &str) -> BTreeSet<String> {
+        let mut found = BTreeSet::new();
+        let mut todo = vec![canonical(unit)];
+        while let Some(name) = todo.pop() {
+            for (other, node) in &self.nodes {
+                if (node.requires.contains(&name) || node.part_of.contains(&name))
+                    && other != unit
+                    && found.insert(other.clone())
+                {
+                    todo.push(other.clone());
+                }
+            }
+        }
+        found
     }
 
     fn closure(&self, roots: impl IntoIterator<Item = String>) -> BTreeSet<String> {
@@ -190,8 +251,9 @@ impl Plan {
                 continue;
             };
             let broken = node.requires.iter().find(|r| {
-                !self.nodes.contains_key(*r)
-                    || (progress(r) == Progress::Failed && !waiting.contains(*r))
+                !is_builtin(r)
+                    && (!self.nodes.contains_key(*r)
+                        || (progress(r) == Progress::Failed && !waiting.contains(*r)))
             });
             if let Some(missing) = broken {
                 out.push((
@@ -203,13 +265,18 @@ impl Plan {
                 continue;
             }
             let mut blocked = false;
-            for before in &node.after {
-                if is_target(before) {
-                    if TARGETS.contains(&before.as_str()) && !reached(before) {
+            // A built-in target is waited for, whether it is ordered after or
+            // required; a unit (a target of the user's included) only while
+            // it is on its way up.
+            for before in node.after.iter().chain(&node.requires) {
+                if is_builtin(before) {
+                    if !reached(before) {
                         blocked = true;
                         held_by_target.insert(name.clone());
                     }
-                } else if waiting.contains(before) || progress(before) == Progress::Starting {
+                } else if node.after.contains(before)
+                    && (waiting.contains(before) || progress(before) == Progress::Starting)
+                {
                     blocked = true;
                 }
             }
@@ -515,9 +582,103 @@ mod tests {
             .collect();
         let (plan, warnings) = Plan::new(&services);
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert!(plan
-            .pulled_in_by(GRAPHICAL_TARGET)
-            .contains("after-ping.service"));
+        let graphical = plan.pulled_in_by(GRAPHICAL_TARGET);
+        assert!(graphical.contains("after-ping.service"));
+        // whkd comes with its group.
+        assert!(graphical.contains("whkd.service"));
+        assert_eq!(plan.bound_to("tiling.target"), set(&["whkd.service"]));
+    }
+
+    fn target(name: &str, text: &str) -> Service {
+        let parsed = parse_service(name, text);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        parsed.service.unwrap()
+    }
+
+    #[test]
+    fn a_target_of_the_user_s_wants_what_is_wanted_by_it() {
+        let units = [
+            target(
+                "tiling.target",
+                "[Unit]\nWants=bar.service\n[Install]\nWantedBy=graphical-session.target\n",
+            ),
+            unit(
+                "komorebi.service",
+                "PartOf=tiling.target",
+                "WantedBy=tiling.target",
+            ),
+            unit("whkd.service", "", "WantedBy=tiling.target"),
+            unit("bar.service", "After=komorebi.service", ""),
+            unit("other.service", "", ""),
+        ];
+        let (plan, warnings) = Plan::new(&units);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let group = set(&[
+            "tiling.target",
+            "komorebi.service",
+            "whkd.service",
+            "bar.service",
+        ]);
+        assert_eq!(plan.with_dependencies("tiling.target"), group);
+        assert_eq!(plan.pulled_in_by(GRAPHICAL_TARGET), group);
+    }
+
+    #[test]
+    fn tray_target_is_the_shell_s() {
+        let services = [unit(
+            "applet.service",
+            "After=tray.target\nRequires=tray.target",
+            "WantedBy=tray.target",
+        )];
+        let (plan, warnings) = Plan::new(&services);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            plan.pulled_in_by(GRAPHICAL_TARGET),
+            set(&["applet.service"])
+        );
+        let mut sim = Sim::new(&services);
+        let mut waiting = set(&["applet.service"]);
+        sim.start(&mut waiting, &[]);
+        assert!(
+            sim.rounds.is_empty(),
+            "waits for the shell, and does not fail"
+        );
+        sim.reached.insert(GRAPHICAL_TARGET.into());
+        sim.start(&mut waiting, &[]);
+        assert_eq!(sim.rounds, [vec!["applet.service"]]);
+    }
+
+    #[test]
+    fn stopping_on_purpose_takes_what_requires_or_is_part_of_it() {
+        let units = [
+            target("tiling.target", "[Unit]\n"),
+            unit(
+                "komorebi.service",
+                "PartOf=tiling.target",
+                "WantedBy=tiling.target",
+            ),
+            unit("bar.service", "Requires=komorebi.service", ""),
+            unit("whkd.service", "", "WantedBy=tiling.target"),
+        ];
+        let (plan, _) = Plan::new(&units);
+        // whkd is only wanted by the target: it stays.
+        assert_eq!(
+            plan.bound_to("tiling.target"),
+            set(&["komorebi.service", "bar.service"])
+        );
+        assert_eq!(plan.bound_to("komorebi.service"), set(&["bar.service"]));
+        assert!(plan.bound_to("whkd.service").is_empty());
+    }
+
+    #[test]
+    fn a_target_nobody_wrote_is_warned_about() {
+        let services = [unit(
+            "a.service",
+            "PartOf=tiling.target",
+            "WantedBy=tiling.target",
+        )];
+        let (_, warnings) = Plan::new(&services);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
     }
 
     #[test]

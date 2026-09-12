@@ -14,7 +14,8 @@ onto it (M4) is next.
 
 ## Units
 
-Units are systemd's syntax, in `%APPDATA%\steward\units\*.service`:
+Units are systemd's syntax, in `%APPDATA%\steward\units\*.service` (and
+`*.target`, below):
 
 ```ini
 [Unit]
@@ -31,12 +32,31 @@ WantedBy=graphical-session.target
 
 `ExecStart=` is a Windows command line, as written. A unit that says nothing
 about restarting is restarted when it fails, with a backoff from a second to a
-minute. `graphical-session.target` is reached once Explorer's taskbar exists.
+minute. `graphical-session.target` is reached once Explorer's taskbar exists
+(`tray.target` is another name for it); `default.target` at sign-in.
 `stewctl verify` checks unit files without a manager.
+
+A `*.target` file is a target of your own, which runs nothing: `[Unit]` and
+`[Install]` only. Units that say `WantedBy=` it start when it does, and units
+that say `PartOf=` it stop and restart with it, so a target makes a group:
+
+```ini
+# tiling.target
+[Unit]
+Description=Tiling window management
+
+[Install]
+WantedBy=graphical-session.target
+```
+
+With `WantedBy=tiling.target` and `PartOf=tiling.target` in komorebi's,
+whkd's and masir's units, `stewctl stop tiling.target` puts all three away and
+`stewctl start tiling.target` brings them back. As in systemd, stopping a
+unit also stops what `Requires=` it; what only `Wants=` it keeps running.
 
 [`examples/`](examples) has units to try, each saying what it shows: a console
 program stopped with Ctrl+C, a crash loop and its backoff, ordering after
-another unit and the shell, and whkd as a real daemon.
+another unit and the shell, and whkd as a real daemon in a tiling target.
 
 ## Using it
 

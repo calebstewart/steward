@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 pub use service::{
     parse_service, Command, Diagnostic, KillMode, Parsed, Restart, Service, ServiceType, Severity,
+    UnitKind, BUILTIN_TARGETS, DEFAULT_TARGET, GRAPHICAL_TARGET, TRAY_TARGET,
 };
 
 /// Where a user's units live: `%APPDATA%\steward\units` -- the XDG config
@@ -27,8 +28,9 @@ pub struct LoadedUnit {
     pub parsed: Parsed,
 }
 
-/// Every `*.service` file in `dir`, sorted by name. A missing directory is an
-/// empty one; a file that cannot be read is an error diagnostic on that unit.
+/// Every `*.service` and `*.target` file in `dir`, sorted by name. A missing
+/// directory is an empty one; a file that cannot be read is an error
+/// diagnostic on that unit.
 pub fn load_dir(dir: &Path) -> std::io::Result<Vec<LoadedUnit>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -37,7 +39,11 @@ pub fn load_dir(dir: &Path) -> std::io::Result<Vec<LoadedUnit>> {
     };
     let mut paths: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "service"))
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .is_some_and(|ext| ext == "service" || ext == "target")
+        })
         .collect();
     paths.sort();
     Ok(paths.into_iter().map(load_file).collect())

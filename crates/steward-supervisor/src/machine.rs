@@ -196,10 +196,13 @@ impl Machine {
     /// rest takes it at once; a running one keeps the definition it was
     /// started with -- its `ExecStop=` included -- until its next start.
     pub fn replace(&mut self, service: Service) {
-        if matches!(
-            self.state,
-            State::Inactive | State::Failed | State::AutoRestart
-        ) {
+        // A target has nothing running that could still be the old one.
+        if service.is_target()
+            || matches!(
+                self.state,
+                State::Inactive | State::Failed | State::AutoRestart
+            )
+        {
             self.service = service;
             self.pending = None;
         } else {
@@ -227,8 +230,14 @@ impl Machine {
 
     /// Take over a service that was already running when the manager started
     /// (the manager crashed or was upgraded and its job survived).
+    /// A target the last manager had reached is simply active again.
     pub fn adopt(&mut self, main_alive: bool, now: Instant) -> Vec<Action> {
         let mut out = Vec::new();
+        if self.service.is_target() {
+            self.state = State::Active;
+            self.active_since = Some(now);
+            return out;
+        }
         self.main = main_alive;
         self.control = false;
         self.job_empty = false;
@@ -251,6 +260,23 @@ impl Machine {
         use Event::*;
         use Process::*;
         use State::*;
+
+        // A target runs nothing: started, it is active; stopped, it is not.
+        if self.service.is_target() {
+            match event {
+                Start => {
+                    self.state = Active;
+                    self.last = None;
+                    self.active_since = Some(now);
+                }
+                Stop => {
+                    self.state = Inactive;
+                    self.active_since = None;
+                }
+                _ => {}
+            }
+            return;
+        }
 
         match event {
             Spawned(process) => {
@@ -948,6 +974,36 @@ mod tests {
         h.feed(Exited(Control, 1));
         h.feed(JobEmpty);
         assert_eq!(h.state(), State::Inactive);
+    }
+
+    fn target(text: &str) -> Machine {
+        Machine::new(parse_service("tiling.target", text).service.unwrap())
+    }
+
+    #[test]
+    fn a_target_is_active_once_started_and_runs_nothing() {
+        let mut t = target("[Unit]\nWants=a.service\n");
+        let now = Instant::now();
+        assert_eq!(t.handle(Start, now), []);
+        assert_eq!(t.state(), State::Active);
+        assert_eq!(t.deadline(), None);
+        assert_eq!(t.handle(Stop, now), []);
+        assert_eq!(t.state(), State::Inactive);
+        assert_eq!(t.adopt(false, now), []);
+        assert_eq!(t.state(), State::Active);
+    }
+
+    #[test]
+    fn a_target_takes_a_new_definition_at_once() {
+        let mut t = target("[Unit]\n");
+        t.handle(Start, Instant::now());
+        let changed = parse_service("tiling.target", "[Unit]\nDescription=new\n")
+            .service
+            .unwrap();
+        t.replace(changed);
+        assert!(!t.is_changed());
+        assert_eq!(t.service().description.as_deref(), Some("new"));
+        assert_eq!(t.state(), State::Active);
     }
 
     #[test]

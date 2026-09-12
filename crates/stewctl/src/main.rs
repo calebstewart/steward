@@ -111,7 +111,8 @@ enum Command {
         #[arg(short, long)]
         follow: bool,
     },
-    /// Check unit files: every *.service in the unit directory, or the files given.
+    /// Check unit files: every *.service and *.target in the unit directory,
+    /// or the files given.
     Verify { files: Vec<PathBuf> },
 }
 

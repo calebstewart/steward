@@ -300,7 +300,7 @@ Where Windows differs:
   as systemd does.
 
 Version 1 understands: `[Unit]` `Description`, `Documentation`, `After`,
-`Before`, `Wants`, `Requires`, `StartLimitBurst`, `StartLimitIntervalSec`;
+`Before`, `Wants`, `Requires`, `PartOf`, `StartLimitBurst`, `StartLimitIntervalSec`;
 `[Service]` `Type` (`simple`, `exec`, `forking`, `oneshot`), `ExecStart`,
 `ExecStartPre`, `ExecStartPost`, `ExecStop`, `Restart`, `RestartSec`,
 `RestartSteps`, `RestartMaxDelaySec`, `TimeoutStartSec`, `TimeoutStopSec`,
@@ -329,7 +329,27 @@ asked for, and that stop ends it cleanly.
 job tracks only the main process, which is the one that exits.
 
 Built-in targets: `default.target` (sign-in) and `graphical-session.target`
-(the shell is ready).
+(the shell is ready), and `tray.target`, home-manager's name for "the tray is
+there", which on Windows is the same moment: another name for
+`graphical-session.target`, so units shared with a Linux home that order
+after it or require it load unchanged. Requiring a built-in target waits for
+it to be reached.
+
+**Targets of the user's own** are `*.target` files: `[Unit]` and `[Install]`
+only, and nothing to run -- started, a target is active; stopped, it is not.
+In the plan a target is a unit like any other. `WantedBy=` it is its
+`Wants=`, so starting it starts what is installed into it, and a target
+`WantedBy=` a built-in one comes up with it. The relations follow systemd, so
+units keep their meaning between the two: stopping or restarting a unit on
+purpose does the same to what `Requires=` it or is `PartOf=` it, and what
+merely `Wants=` it keeps running. A group -- the tiling stack, stopped for a
+game -- is therefore a target its members are `WantedBy=` and `PartOf=`. A
+target's definition changes at once on a reload (nothing runs the old one),
+and `switch` does not restart it, which would restart its group for an
+edited description. An active target is recorded in the state file with the
+services' processes, so the next manager has it active too. A target named
+only in `WantedBy=`, with no file, is a warning, as in systemd: it cannot be
+started.
 
 ## Nix and winpkgs
 
