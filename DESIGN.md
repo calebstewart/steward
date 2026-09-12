@@ -96,8 +96,10 @@ a sign-out/sign-in, a crash, and a lock/unlock.
 | Crash | The template's failure actions are copied to the instance. An abrupt exit was followed by a new process 5.003 s later. |
 | Rights | Interactive users may query the instance and send it user-defined controls (128-255), but not start or stop it (`sc sdshow`: `CCLCSWLOCRRC` for IU). `CDPUserSvc_*` is the same. |
 | Session events | `SERVICE_CONTROL_SESSIONCHANGE` arrives for lock and unlock. |
+| Sign-out | A plain `SERVICE_CONTROL_STOP`, about 180 ms before Winlogon logs the session off, and no logoff session change before it (observed with steward itself, 2026-09-12). The session's processes outlive the Stop by seconds: a service steward left running was still alive 10 s later. |
 
-Not yet observed: what an instance receives at sign-out, and how long it has.
+Not yet observed: how long an instance has at sign-out before its session's
+processes are ended.
 
 ### Consequences
 
@@ -147,11 +149,17 @@ Not yet observed: what an instance receives at sign-out, and how long it has.
 4. **A stop is deliberate.** A service stopped with `stewctl` stays stopped
    until it is started or the user signs in again; enabled units start at
    every sign-in.
-5. **Upgrades are ordinary.** The system configuration (elevated) stops the
-   instance, replaces `steward.exe`, and starts it again; by layer 2 the
-   services never notice. A service's own binary can be replaced by stopping
-   the unit first -- which fixes today's "file in use" failures when winpkgs
-   mirrors a portable package over a running program.
+5. **Upgrades are ordinary.** A Stop from the SCM means stop: it is what
+   sign-out sends, and the services are stopped in order. An upgrade instead
+   sends the instance user-defined control 128, *hand over*: the manager
+   detaches, leaving every service running and recorded, and stops. The
+   system configuration (elevated) then starts the instance on the new
+   `steward.exe`, which adopts them by layer 2; the services never notice.
+   winpkgs sends it through `windows.services.<name>.restartControl`, in
+   place of the Stop with which it restarts a changed service. A service's
+   own binary can be replaced by stopping the unit first -- which fixes
+   today's "file in use" failures when winpkgs mirrors a portable package
+   over a running program.
 
 ## Supervising a process
 
@@ -346,12 +354,11 @@ build remaps them.
   write `%LOCALAPPDATA%`. Leaning towards systemd's meaning plus `${VAR}`,
   since `%VAR%` expansion belongs to cmd, not to `CreateProcess`. Undecided;
   v1 passes `%` through untouched.
-- **Sign-out.** What the instance is sent (stop? shutdown? session change?)
-  and the time it has to stop services in order. For now: the SCM's Stop
-  detaches (as for an upgrade), and a logoff session change for the manager's
-  own session, shutdown and pre-shutdown stop everything in order. The
-  manager logs every control it receives, so the first real sign-out answers
-  the question.
+- **Sign-out's time budget.** Sign-out sends a Stop (see the spike), and the
+  manager stops every service in order, reporting `STOP_PENDING` with a 30 s
+  hint. How long Windows waits before ending the session's processes is not
+  known yet; the manager logs each service it stops, so a sign-out with slow
+  `ExecStop=` commands will show where the limit is.
 - **After the failure actions run out.** Whether the SCM repeats the last
   action or gives up, and so how many to register.
 - **Readiness.** Whether any Windows program is worth a `Type=notify`

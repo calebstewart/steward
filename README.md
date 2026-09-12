@@ -92,8 +92,14 @@ sc failure steward reset= 60 actions= restart/5000/restart/5000/restart/5000
 
 Windows starts an instance, `steward_<suffix>`, at every sign-in, so sign out
 and in. Anything a unit now runs should no longer be started by a Run key or
-the Startup folder, or it will run twice. To remove it: `sc stop` and
-`sc delete` the instance, `sc delete steward`, and delete the directory.
+the Startup folder, or it will run twice.
+
+Stopping the instance stops every service, as signing out does. To upgrade
+without stopping them, hand over to the new manager instead: `sc control
+steward_<suffix> 128` (the manager detaches and exits, its services left
+running), copy the new binaries in, and `sc start steward_<suffix>`; the new
+manager adopts them. To remove it: `sc stop` and `sc delete` the instance,
+`sc delete steward`, and delete the directory.
 
 ## License
 

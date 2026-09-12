@@ -4,10 +4,11 @@
 //!
 //! Starts and stops are ordered by the plan: `default.target` is reached at
 //! once, `graphical-session.target` when the shell is ready. On the way out
-//! the manager either stops everything, in reverse order (sign-out, system
-//! shutdown, Ctrl+C in a console), or detaches, leaving its services running
-//! and their jobs recorded for the next manager to adopt (the SCM stopping
-//! the instance, as an upgrade does).
+//! the manager either stops everything, in reverse order (the SCM stopping
+//! the instance, which is what sign-out does; system shutdown; Ctrl+C in a
+//! console), or detaches, leaving its services running and their jobs
+//! recorded for the next manager to adopt (handing over to a new manager, as
+//! an upgrade does).
 
 use std::collections::{BTreeSet, VecDeque};
 use std::io::Write;

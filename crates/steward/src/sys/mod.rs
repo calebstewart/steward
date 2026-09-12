@@ -15,6 +15,7 @@ use std::os::windows::io::{FromRawHandle, OwnedHandle};
 
 use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
 
 /// A NUL-terminated UTF-16 copy of `s`.
@@ -37,6 +38,17 @@ unsafe fn owned(handle: HANDLE) -> io::Result<OwnedHandle> {
     } else {
         Ok(OwnedHandle::from_raw_handle(handle))
     }
+}
+
+/// The session a process runs in, if it can be told.
+pub fn session_of(pid: u32) -> Option<u32> {
+    let mut session = 0;
+    (unsafe { ProcessIdToSessionId(pid, &mut session) } != 0).then_some(session)
+}
+
+/// The session this process runs in.
+pub fn own_session() -> u32 {
+    session_of(std::process::id()).unwrap_or(u32::MAX)
 }
 
 /// Explorer's taskbar exists: the shell is ready, and with it
