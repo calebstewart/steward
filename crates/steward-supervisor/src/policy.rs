@@ -17,8 +17,9 @@ pub enum Outcome {
     /// When steward stops a service it sends that Ctrl+C itself, and the stop
     /// being asked for is what counts; a Ctrl+C from anywhere else is a
     /// failure, where systemd would count SIGINT as clean. Durability first:
-    /// the likeliest sender is Windows ending a session, and the service
-    /// should come back.
+    /// nothing a user does sends a windowless service Ctrl+C, so one steward
+    /// did not send is something going wrong, and the service should come
+    /// back.
     Interrupted,
     /// An exception: the exit code is an NTSTATUS error (0xC0000000 and up),
     /// such as an access violation or a failed stack check.

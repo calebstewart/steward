@@ -96,7 +96,7 @@ a sign-out/sign-in, a crash, and a lock/unlock.
 | Crash | The template's failure actions are copied to the instance. An abrupt exit was followed by a new process 5.003 s later. |
 | Rights | Interactive users may query the instance and send it user-defined controls (128-255), but not start or stop it (`sc sdshow`: `CCLCSWLOCRRC` for IU). `CDPUserSvc_*` is the same. |
 | Session events | `SERVICE_CONTROL_SESSIONCHANGE` arrives for lock and unlock. |
-| Sign-out | A plain `SERVICE_CONTROL_STOP`, about 180 ms before Winlogon logs the session off, and no logoff session change before it (observed with steward itself, 2026-09-12). The session's processes outlive the Stop by seconds: a service steward left running was still alive 10 s later. |
+| Sign-out | A plain `SERVICE_CONTROL_STOP`, about 180 ms before Winlogon logs the session off, and no logoff session change before it (observed with steward itself, 2026-09-12). The session's processes outlive the Stop by seconds: a service steward left running was still alive 10 s later. Stopping every service on that Stop works: `ping` was stopped in order in 16 ms, and the next session's manager started it afresh. |
 
 Not yet observed: how long an instance has at sign-out before its session's
 processes are ended.
@@ -315,10 +315,12 @@ fast says so. Timeouts are shorter than systemd's: `TimeoutStartSec=30s`,
 
 A console program ended by a Ctrl+C that steward did not send, or by its
 console closing (`STATUS_CONTROL_C_EXIT`), has *failed*, where systemd counts
-SIGINT as clean: nothing a user does sends a windowless service Ctrl+C, and
-the likeliest sender is Windows ending a session, after which the service
-should come back. The Ctrl+C steward sends when it stops a service is part of
-a stop that was asked for, and that stop ends it cleanly.
+SIGINT as clean: nothing a user does sends a windowless service Ctrl+C, so
+one steward did not send is something going wrong, and the service should
+come back. (A session's end is not that sender: a `ping` left running when
+its session was signed out exited with code 0, observed 2026-09-12.) The
+Ctrl+C steward sends when it stops a service is part of a stop that was
+asked for, and that stop ends it cleanly.
 
 `Type=forking` requires `KillMode=control-group`: with `KillMode=process` the
 job tracks only the main process, which is the one that exits.
