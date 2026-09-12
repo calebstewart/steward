@@ -331,18 +331,38 @@ Built-in targets: `default.target` (sign-in) and `graphical-session.target`
 ## Nix and winpkgs
 
 steward is its own flake. It exports the Windows binaries, cross-built
-(`pkgsCross.mingwW64`; they import nothing but Windows' own DLLs), and an
+(`pkgsCross.mingwW64`; they import nothing but Windows' own DLLs), an
 overlay for package sets that already target Windows, such as `pkgs` inside a
-winpkgs module. M3 adds winpkgs modules, for a consumer to import:
-  - **system**: put `steward.exe` in `%ProgramFiles%\steward` and register the
-    template. winpkgs has no resource for registering a service yet; one is
-    needed (`sc create`/`sc config`/`sc failure`, stopping instances around a
-    binary change).
-  - **home**: write unit files into `%APPDATA%\steward\units` and have
-    `stewctl daemon-reload` plus restarts of changed units follow an apply,
-    the way home-manager's `sd-switch` does. Whether home-manager's own
-    `systemd.user.services` can be the option surface (as `programs.gh` and
-    `oh-my-posh` reuse home-manager's options) is to be checked.
+winpkgs module, and two winpkgs modules as `windowsModules` (winpkgs' own
+name for its module trees), for a consumer to import. Both are
+`services.steward.enable`.
+
+- **`windowsModules.system`** installs `steward.exe` and `stewctl.exe` in a
+  fixed directory (`C:\Program Files\steward`), puts it on the machine PATH,
+  and declares the template through winpkgs' `windows.services`: `userOwn`,
+  started automatically, restarted by the SCM three times 5 s apart,
+  `restartTriggers = [ package ]` and `restartControl = 128`.
+
+  The directory is fixed because an instance cannot be changed: Windows
+  copies the template into it at sign-in and refuses `ChangeServiceConfig` on
+  it afterwards, even for no change at all (probed 2026-09-12). A versioned
+  directory would reach a signed-in user only at their next sign-in. So an
+  upgrade replaces the binaries in place -- winpkgs moves the running
+  `steward.exe` aside to write the new one, and deletes it once nothing runs
+  it -- and the new build's revision restarts every running instance with
+  control 128: the old manager hands its services over, and the instance
+  starts again from the same path, as the new manager, which adopts them.
+- **`windowsModules.home`** writes home-manager's own
+  `systemd.user.services` as unit files in `%APPDATA%\steward\units`.
+  winpkgs evaluates home-manager's modules, so the option is there, and on
+  Windows home-manager's systemd module is off, its units going nowhere.
+  Units are free-form `Section.Key` attributes rendered as home-manager
+  renders them, which steward reads as systemd would; `X-Restart-Triggers=`
+  and `X-Reload-Triggers=`, which name store paths, are written as their
+  hash, so a changed trigger still changes the file. After an apply,
+  `stewctl switch` makes the running manager follow the files, as
+  home-manager runs `sd-switch` -- by hand until winpkgs can run a command
+  after an apply (winpkgs#13).
 
 Binaries that pass through winpkgs must not contain `/nix/store/` (its closure
 build refuses such files); Rust embeds source paths in panic locations, so the
@@ -362,8 +382,12 @@ build remaps them.
   `switch`, `logs -f`. Exercised against a `--console` manager: queries,
   stop/start/restart, a second manager refused, a unit edited, one added and
   one removed while running, and `daemon-reload` then `switch`.
-- **M3** -- winpkgs integration: the service resource in winpkgs, the two
-  modules, activation hooks.
+- **M3** -- winpkgs integration: the service resource in winpkgs (done, with
+  `restartControl`; exercised on the machine: template registered, an
+  instance at sign-in, a handover under the same PIDs, stop-all at
+  sign-out), the two modules (written; their evaluation and closures are
+  flake checks), replacing a running binary in winpkgs, and running
+  `stewctl switch` after an apply (winpkgs#13).
 - **M4** -- move whkd, komorebi, masir, Flow Launcher and thide off Run keys.
 - **Later** -- timers, event triggers.
 

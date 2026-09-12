@@ -9,7 +9,7 @@ and tells you what they are doing.
 
 See [DESIGN.md](DESIGN.md) for the design, what has been established on a real
 machine, and the roadmap. Supervision (M1) and the control plane (M2) are
-done; integration with winpkgs (M3) is next.
+done; integration with winpkgs (M3) is under way.
 
 ## Units
 
@@ -79,9 +79,45 @@ manager runs per session. To try it without touching your own directories, point
 unit directory, logs and state follow them (the services still get your real
 environment).
 
-## Installing it as a per-user service
+## Installing it with winpkgs
 
-Once, from an administrator prompt (winpkgs will do this in M3):
+The flake exports two [winpkgs](https://github.com/calebstewart/winpkgs)
+modules. The system one installs steward and registers it; the home one
+writes a user's units from home-manager's `systemd.user.services`:
+
+```nix
+# flake inputs
+steward = {
+  url = "github:calebstewart/steward";
+  inputs.nixpkgs.follows = "nixpkgs";
+  inputs.winpkgs.follows = "winpkgs";
+};
+
+# the system configuration
+imports = [ inputs.steward.windowsModules.system ];
+services.steward.enable = true;
+
+# the home configuration
+imports = [ inputs.steward.windowsModules.home ];
+services.steward.enable = true;
+systemd.user.services.whkd = {
+  Unit.Description = "Hotkey daemon";
+  Unit.After = [ "graphical-session.target" ];
+  Service.ExecStart = ''"C:\Program Files\whkd\bin\whkd.exe"'';
+  Service.KillMode = "process";
+  Install.WantedBy = [ "graphical-session.target" ];
+};
+```
+
+A system apply installs steward in `C:\Program Files\steward` (on the
+machine PATH) and registers the template; the first manager starts at the
+next sign-in. A later build is installed in place and the running managers
+hand their services to the new one. After a home apply, run `stewctl switch`
+for the running manager to pick up the changed units.
+
+## Installing it as a per-user service by hand
+
+Once, from an administrator prompt:
 
 ```
 mkdir "C:\Program Files\steward"
