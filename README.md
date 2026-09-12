@@ -32,8 +32,9 @@ WantedBy=graphical-session.target
 
 `ExecStart=` is a Windows command line, as written. A unit that says nothing
 about restarting is restarted when it fails, with a backoff from a second to a
-minute. `graphical-session.target` is reached once Explorer's taskbar exists
-(`tray.target` is another name for it); `default.target` at sign-in.
+minute. `default.target` is reached at sign-in, `graphical-session.target`
+once Explorer's taskbar exists, and `tray.target` once the tray takes icons,
+about a second later: a tray program orders itself `After=tray.target`.
 `stewctl verify` checks unit files without a manager.
 
 A `*.target` file is a target of your own, which runs nothing: `[Unit]` and

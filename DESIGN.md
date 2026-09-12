@@ -107,8 +107,8 @@ processes are ended.
 - **A "shell is ready" stage is required.** The manager is up before Explorer's
   desktop and taskbar exist. Units that need them order themselves after
   `graphical-session.target`, which steward reaches when the taskbar window
-  (`Shell_TrayWnd`) exists. Explorer re-broadcasts `TaskbarCreated` when it
-  restarts, which is how tray-icon services can be told to re-register.
+  (`Shell_TrayWnd`) exists, and tray programs after `tray.target`, reached
+  when Explorer broadcasts `TaskbarCreated` (see "When the tray is ready").
 - **The service name is not an address.** It changes every sign-in; `stewctl`
   finds the manager through its named pipe.
 - **A manager belongs to a session, not to a user.** Its services run on the
@@ -330,13 +330,13 @@ asked for, and that stop ends it cleanly.
 `Type=forking` requires `KillMode=control-group`: with `KillMode=process` the
 job tracks only the main process, which is the one that exits.
 
-Built-in targets: `default.target` (sign-in) and `graphical-session.target`
+Built-in targets: `default.target` (sign-in), `graphical-session.target`
 (the shell is ready), and `tray.target`, home-manager's name for "the tray is
-there", which on Windows is the same moment: another name for
-`graphical-session.target`, so units shared with a Linux home that order
-after it or require it load unchanged. `timers.target`, where timers are
-installed, is another name for `default.target`. Requiring a built-in target
-waits for it to be reached.
+there" (the tray takes icons, a moment after the shell is ready), so units
+shared with a Linux home that order after it or require it load unchanged.
+`timers.target`, where timers are installed, is another name for
+`default.target`. Requiring a built-in target waits for it to be reached.
+Once reached, a built-in target stays reached for the session.
 
 **Targets of the user's own** are `*.target` files: `[Unit]` and `[Install]`
 only, and nothing to run -- started, a target is active; stopped, it is not.
@@ -353,6 +353,43 @@ edited description. An active target is recorded in the state file with the
 services' processes, so the next manager has it active too. A target named
 only in `WantedBy=`, with no file, is a warning, as in systemd: it cannot be
 started.
+
+### When the tray is ready
+
+The taskbar window exists a second before its notification area takes an
+icon, and a tray program started in between fails: `Shell_NotifyIcon(NIM_ADD)`
+returns `E_FAIL`. thide did, at sign-in, until its restart a second later
+(steward#3). Measured on gaming-windows (2026-09-12) with a probe that tried a
+hidden icon every 20 ms:
+
+| | sign-in | Explorer restarted |
+|---|---|---|
+| `Shell_TrayWnd` exists | 0 | 0 |
+| `TrayNotifyWnd`, its notification area, exists | +75 ms | +61 ms |
+| `NIM_ADD` fails with `E_FAIL` | 27 times, to +1.1 s | 22 times, to +1.0 s |
+| `NIM_ADD` succeeds | +1120 ms | +1039 ms |
+| `TaskbarCreated` arrives | +1143 ms | +1104 ms |
+
+So `TrayNotifyWnd` is no later signal. `TaskbarCreated` is: Explorer
+broadcasts it at its first start as well as after a restart, and only once
+the tray takes icons. It is what tray programs already listen for to add their
+icons again. steward hears it with a hidden top-level window of its own (a
+message-only window gets no broadcasts), on a thread that pumps its messages,
+and reaches `tray.target` with it. A probe like the one above would be exact
+too, but even a hidden icon leaves a permanent entry in Settings' list of tray
+icons.
+
+A manager that started after the broadcast (a handover, a restart by the SCM)
+cannot have heard it. If the taskbar was already there when the manager began
+listening, the tray counts as ready 10 s after Explorer started, which for a
+manager handed over to is at once. The same limit applies, with a warning,
+if a manager that was listening in time never hears the broadcast, so that a
+Windows that stopped sending it would delay tray programs instead of never
+starting them.
+
+When Explorer restarts, `tray.target` stays reached and nothing is restarted.
+Tray programs hear the same broadcast and add their icons again; thide, a
+tray-icon program, came through a restart untouched.
 
 ## Timers
 

@@ -1,13 +1,13 @@
 //! Which units start when, and in what order, and what stops with what.
 //!
-//! Four targets are built in. `default.target` is reached as soon as the
-//! manager is up, at sign-in; `timers.target`, where timers are installed, is
-//! another name for it. `graphical-session.target` is reached once the shell
-//! is ready -- Explorer's taskbar exists -- which the manager finds out for
-//! itself; before that there are no windows to manage and no tray to sit in.
-//! `tray.target` is another name for it. A unit is started when a target it
-//! is `WantedBy=` is reached, along with everything it `Wants=` or
-//! `Requires=`.
+//! Four targets are built in, and the manager finds out for itself when each
+//! is reached. `default.target` is reached as soon as the manager is up, at
+//! sign-in; `timers.target`, where timers are installed, is another name for
+//! it. `graphical-session.target` is reached once the shell is ready --
+//! Explorer's taskbar exists -- before which there are no windows to manage.
+//! `tray.target` is reached once the tray takes icons, a moment later. A unit
+//! is started when a target it is `WantedBy=` is reached, along with
+//! everything it `Wants=` or `Requires=`.
 //!
 //! Any other target is a unit file of its own, a unit that runs nothing, and
 //! in the plan it is a unit like any other: `WantedBy=` it is its `Wants=`,
@@ -41,19 +41,18 @@ pub use steward_unit::{DEFAULT_TARGET, GRAPHICAL_TARGET, TIMERS_TARGET, TRAY_TAR
 use crate::machine::State;
 
 /// Reached by the manager, not started: `default.target` and
-/// `timers.target` (which is the former), `graphical-session.target` and
-/// `tray.target` (which is the latter).
+/// `timers.target` (which is the former), `graphical-session.target`, and
+/// `tray.target`.
 fn is_builtin(name: &str) -> bool {
     BUILTIN_TARGETS.contains(&name)
 }
 
-/// The name a unit's dependency means: `tray.target` is the shell's,
-/// `timers.target` sign-in's.
+/// The name a unit's dependency means: `timers.target` is sign-in's.
 fn canonical(name: &str) -> String {
-    match name {
-        TRAY_TARGET => GRAPHICAL_TARGET.to_owned(),
-        TIMERS_TARGET => DEFAULT_TARGET.to_owned(),
-        _ => name.to_owned(),
+    if name == TIMERS_TARGET {
+        DEFAULT_TARGET.to_owned()
+    } else {
+        name.to_owned()
     }
 }
 
@@ -645,28 +644,39 @@ mod tests {
     }
 
     #[test]
-    fn tray_target_is_the_shell_s() {
-        let services = [unit(
-            "applet.service",
-            "After=tray.target\nRequires=tray.target",
-            "WantedBy=tray.target",
-        )];
+    fn tray_target_is_its_own_and_comes_after_the_shell() {
+        let services = [
+            unit(
+                "applet.service",
+                "After=tray.target\nRequires=tray.target",
+                "WantedBy=tray.target",
+            ),
+            // As home-manager writes a tray program: pulled in with the
+            // session, ordered after the tray.
+            unit(
+                "hm-applet.service",
+                "After=graphical-session.target tray.target",
+                "WantedBy=graphical-session.target",
+            ),
+        ];
         let (plan, warnings) = Plan::new(&services);
         assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(plan.pulled_in_by(TRAY_TARGET), set(&["applet.service"]));
         assert_eq!(
             plan.pulled_in_by(GRAPHICAL_TARGET),
-            set(&["applet.service"])
+            set(&["hm-applet.service"])
         );
         let mut sim = Sim::new(&services);
-        let mut waiting = set(&["applet.service"]);
+        let mut waiting = set(&["applet.service", "hm-applet.service"]);
+        sim.reached.insert(GRAPHICAL_TARGET.into());
         sim.start(&mut waiting, &[]);
         assert!(
             sim.rounds.is_empty(),
-            "waits for the shell, and does not fail"
+            "both wait for the tray, and neither fails"
         );
-        sim.reached.insert(GRAPHICAL_TARGET.into());
+        sim.reached.insert(TRAY_TARGET.into());
         sim.start(&mut waiting, &[]);
-        assert_eq!(sim.rounds, [vec!["applet.service"]]);
+        assert_eq!(sim.rounds, [vec!["applet.service", "hm-applet.service"]]);
     }
 
     #[test]

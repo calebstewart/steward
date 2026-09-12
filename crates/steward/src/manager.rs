@@ -3,7 +3,8 @@
 //! and carrying out the actions the machines answer with.
 //!
 //! Starts and stops are ordered by the plan: `default.target` is reached at
-//! once, `graphical-session.target` when the shell is ready. On the way out
+//! once, `graphical-session.target` when Explorer's taskbar exists, and
+//! `tray.target` when Explorer says the taskbar is ready. On the way out
 //! the manager either stops everything, in reverse order (the SCM stopping
 //! the instance, which is what sign-out does; system shutdown; Ctrl+C in a
 //! console), or detaches, leaving its services running and their jobs
@@ -52,6 +53,8 @@ use crate::sys::{self, env, signal};
 pub const KEY_WAKE: usize = 1;
 /// A process exited; the packet's value is its token.
 const KEY_EXIT: usize = 2;
+/// Explorer broadcast `TaskbarCreated`: its tray takes icons.
+const KEY_TASKBAR_CREATED: usize = 3;
 /// A job's notification; the key is this plus the job's serial number.
 const KEY_JOB_BASE: usize = 0x1_0000;
 
@@ -59,6 +62,10 @@ const KEY_JOB_BASE: usize = 0x1_0000;
 const TICK: Duration = Duration::from_secs(1);
 /// How often to look for the shell until it is there.
 const SHELL_POLL: Duration = Duration::from_millis(250);
+/// How long after Explorer starts its tray surely takes icons, `TaskbarCreated`
+/// or not: for a manager that started too late to hear it, or one that never
+/// does. It took under 2 s on gaming-windows, at sign-in and at a restart.
+const TRAY_GRACE: Duration = Duration::from_secs(10);
 /// A unit's log is set aside, once, when it passes this size at a start.
 const LOG_ROTATE_BYTES: u64 = 8 << 20;
 /// The exit code steward terminates processes with.
@@ -149,6 +156,13 @@ struct Manager {
     to_start: BTreeSet<String>,
     to_stop: BTreeSet<String>,
     graphical: bool,
+    tray: bool,
+    /// Listening for `TaskbarCreated` since before the taskbar existed, so
+    /// the broadcast that readies the tray cannot have been missed.
+    hears_taskbar_created: bool,
+    /// When the tray counts as ready without the broadcast: Explorer's start
+    /// and [`TRAY_GRACE`], once the taskbar is seen.
+    tray_deadline: Option<Instant>,
     exit: Option<Exit>,
     next_token: usize,
     next_serial: usize,
@@ -186,6 +200,9 @@ pub fn run(port: Port, controls: Sender<Control>, inbox: Receiver<Control>) {
         to_start: BTreeSet::new(),
         to_stop: BTreeSet::new(),
         graphical: false,
+        tray: false,
+        hears_taskbar_created: false,
+        tray_deadline: None,
         exit: None,
         next_token: 1,
         next_serial: 1,
@@ -204,6 +221,7 @@ pub fn run(port: Port, controls: Sender<Control>, inbox: Receiver<Control>) {
     manager.adopt();
     let wanted = manager.plan.pulled_in_by(DEFAULT_TARGET);
     manager.want_started(wanted);
+    manager.watch_taskbar_created();
     manager.check_shell();
     manager.run();
 }
@@ -402,6 +420,9 @@ impl Manager {
         if self.graphical {
             wanted.extend(self.plan.pulled_in_by(GRAPHICAL_TARGET));
         }
+        if self.tray {
+            wanted.extend(self.plan.pulled_in_by(TRAY_TARGET));
+        }
         wanted
     }
 
@@ -522,6 +543,7 @@ impl Manager {
             pid: std::process::id(),
             session: self.session,
             graphical_session: self.graphical,
+            tray: self.tray,
             unit_dir: text(steward_unit::user_unit_dir()),
             log_dir: text(self.state_dir.as_ref().map(|d| d.join("logs"))),
         }
@@ -739,10 +761,10 @@ impl Manager {
     fn timeout(&self) -> Duration {
         let now = Instant::now();
         let mut timeout = if self.graphical { TICK } else { SHELL_POLL };
-        for unit in &self.units {
-            if let Some(deadline) = unit.machine.deadline() {
-                timeout = timeout.min(deadline.saturating_duration_since(now));
-            }
+        let deadlines = self.units.iter().map(|u| u.machine.deadline());
+        let tray = (!self.tray).then_some(self.tray_deadline).flatten();
+        for deadline in deadlines.chain([tray]).flatten() {
+            timeout = timeout.min(deadline.saturating_duration_since(now));
         }
         if let Some(next) = self.next_elapse {
             let left = next.duration_since(SystemTime::now()).unwrap_or_default();
@@ -790,7 +812,8 @@ impl Manager {
     fn reached(&self, target: &str) -> bool {
         match target {
             DEFAULT_TARGET | TIMERS_TARGET => true,
-            GRAPHICAL_TARGET | TRAY_TARGET => self.graphical,
+            GRAPHICAL_TARGET => self.graphical,
+            TRAY_TARGET => self.tray,
             _ => false,
         }
     }
@@ -838,14 +861,67 @@ impl Manager {
         }
     }
 
+    /// Listen for Explorer's `TaskbarCreated` from before its taskbar exists,
+    /// if it does not yet, so the broadcast that readies the tray is heard.
+    fn watch_taskbar_created(&mut self) {
+        match sys::shell::watch_taskbar_created(self.port.waker(), KEY_TASKBAR_CREATED) {
+            Ok(()) => self.hears_taskbar_created = !sys::shell::taskbar_exists(),
+            Err(e) => warning!(
+                "cannot listen for Explorer's TaskbarCreated ({e}); \
+                 {TRAY_TARGET} will be reached {TRAY_GRACE:?} after Explorer starts"
+            ),
+        }
+    }
+
     fn check_shell(&mut self) {
-        if !self.graphical && sys::shell_ready() {
-            self.graphical = true;
-            info!("the shell is ready: {GRAPHICAL_TARGET} reached");
-            if self.exit.is_none() {
-                let wanted = self.plan.pulled_in_by(GRAPHICAL_TARGET);
-                self.want_started(wanted);
+        if !self.graphical && sys::shell::taskbar_exists() {
+            self.reach_graphical();
+        }
+        if !self.tray && self.tray_deadline.is_some_and(|d| Instant::now() >= d) {
+            if self.hears_taskbar_created {
+                warning!(
+                    "Explorer has not said its taskbar is ready, {TRAY_GRACE:?} after it \
+                     started; {TRAY_TARGET} reached anyway"
+                );
+            } else {
+                info!("Explorer has been running for {TRAY_GRACE:?} or more: the tray is ready");
             }
+            self.reach_tray();
+        }
+    }
+
+    fn taskbar_created(&mut self) {
+        if self.tray {
+            // Tray programs hear the same broadcast and add their icons again.
+            info!("Explorer's taskbar was created again: Explorer restarted");
+            return;
+        }
+        info!("Explorer says its taskbar is ready");
+        if !self.graphical {
+            self.reach_graphical();
+        }
+        self.reach_tray();
+    }
+
+    fn reach_graphical(&mut self) {
+        self.graphical = true;
+        info!("the shell is ready: {GRAPHICAL_TARGET} reached");
+        // Timed from Explorer's start rather than from now: a manager that
+        // finds a taskbar Explorer made long ago finds its tray ready too.
+        let age = sys::shell::explorer_age().unwrap_or_default();
+        self.tray_deadline = Some(Instant::now() + TRAY_GRACE.saturating_sub(age));
+        if self.exit.is_none() {
+            let wanted = self.plan.pulled_in_by(GRAPHICAL_TARGET);
+            self.want_started(wanted);
+        }
+    }
+
+    fn reach_tray(&mut self) {
+        self.tray = true;
+        info!("the tray takes icons: {TRAY_TARGET} reached");
+        if self.exit.is_none() {
+            let wanted = self.plan.pulled_in_by(TRAY_TARGET);
+            self.want_started(wanted);
         }
     }
 
@@ -983,6 +1059,7 @@ impl Manager {
         match packet.key {
             KEY_WAKE => {}
             KEY_EXIT => self.process_exited(packet.value),
+            KEY_TASKBAR_CREATED => self.taskbar_created(),
             key if key >= KEY_JOB_BASE => {
                 self.job_message(key - KEY_JOB_BASE, packet.bytes, packet.value as u32)
             }

@@ -73,6 +73,9 @@ pub struct ManagerStatus {
     pub session: u32,
     /// Whether the shell is ready (`graphical-session.target` reached).
     pub graphical_session: bool,
+    /// Whether the tray takes icons (`tray.target` reached).
+    #[serde(default)]
+    pub tray: bool,
     pub unit_dir: String,
     pub log_dir: String,
 }

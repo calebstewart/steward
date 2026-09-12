@@ -73,8 +73,9 @@ impl fmt::Display for Diagnostic {
 pub const DEFAULT_TARGET: &str = "default.target";
 /// Reached once the shell is ready: Explorer's taskbar exists.
 pub const GRAPHICAL_TARGET: &str = "graphical-session.target";
-/// home-manager's name for "the tray is there", which on Windows is when the
-/// taskbar is: another name for `graphical-session.target`.
+/// home-manager's name for "the tray is there": reached once the tray takes
+/// icons, when Explorer broadcasts `TaskbarCreated` -- about a second after
+/// `graphical-session.target`, at sign-in.
 pub const TRAY_TARGET: &str = "tray.target";
 /// Where timers are installed. systemd reaches it early in a user manager's
 /// start; here it is another name for `default.target`.
