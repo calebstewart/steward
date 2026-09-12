@@ -45,9 +45,21 @@ let
           };
           Install.WantedBy = [ "graphical-session.target" ];
         };
+        systemd.user.targets.tiling = {
+          Unit.Description = "Tiling window management";
+          Install.WantedBy = [ "graphical-session.target" ];
+        };
       }
     ];
   };
+
+  expectedTarget = pkgs.writeText "tiling.target" ''
+    [Install]
+    WantedBy=graphical-session.target
+
+    [Unit]
+    Description=Tiling window management
+  '';
 
   # The same home with whkd's unit changed: its switch must run again.
   changed = user.extendModules {
@@ -121,6 +133,13 @@ in
         source=$(jq -r '.resources[] | select(.type == "winpkgs/file" and .properties.target == "%APPDATA%/steward/units/whkd.service") | .properties.source' <<<"$doc")
         test -n "$source"
         diff -u ${expectedUnit} "$closure/$source"
+
+        # A target of the user's is written; home-manager's tray.target,
+        # steward's own, is not.
+        target=$(jq -r '.resources[] | select(.type == "winpkgs/file" and .properties.target == "%APPDATA%/steward/units/tiling.target") | .properties.source' <<<"$doc")
+        diff -u ${expectedTarget} "$closure/$target"
+        test "$(jq '[.resources[] | select(.id | test("tray"))] | length' <<<"$doc")" = 0
+
         test "$(jq '[.resources[] | select(.type == "winpkgs/file" and (.id | test("steward")))] | length' <<<"$bareDoc")" = 0
 
         # The switch after an apply: last, and again when a unit changes.

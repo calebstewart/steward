@@ -1,6 +1,8 @@
 # steward in a winpkgs home configuration: home-manager's own
-# `systemd.user.services` written as steward's units, in
-# %APPDATA%\steward\units.
+# `systemd.user.services` and `systemd.user.targets` written as steward's
+# units, in %APPDATA%\steward\units. The targets steward has built in --
+# default, graphical-session, and tray, which home-manager declares in every
+# configuration -- are steward's, and not written.
 #
 # winpkgs evaluates home-manager's modules, so the option is already there;
 # on Windows home-manager's systemd module is off (`systemd.user.enable`
@@ -22,7 +24,17 @@
   ...
 }:
 let
-  units = config.systemd.user.services;
+  builtinTargets = [
+    "default"
+    "graphical-session"
+    "tray"
+  ];
+  # "whkd.service" -> its definition; "tiling.target" -> its definition.
+  units =
+    lib.mapAttrs' (name: unit: lib.nameValuePair "${name}.service" unit) config.systemd.user.services
+    // lib.mapAttrs' (name: unit: lib.nameValuePair "${name}.target" unit) (
+      removeAttrs config.systemd.user.targets builtinTargets
+    );
 
   # home-manager's toSystemdIni: booleans as true/false, lists as repeated keys.
   toIni = lib.generators.toINI {
@@ -58,9 +70,7 @@ let
       )
     );
 
-  # Kinds of unit steward does not run (yet). Targets are not among them:
-  # they run nothing, steward has its own, and home-manager declares one
-  # (tray.target) in every configuration.
+  # Kinds of unit steward does not run (yet).
   otherKinds = lib.filter (kind: config.systemd.user.${kind} != { }) [
     "timers"
     "sockets"
@@ -75,7 +85,7 @@ in
   # reads units, wherever xdg.configHome points.
   home.file = lib.mapAttrs' (
     name: unit:
-    lib.nameValuePair "AppData/Roaming/steward/units/${name}.service" {
+    lib.nameValuePair "AppData/Roaming/steward/units/${name}" {
       text = render unit;
     }
   ) units;
@@ -93,7 +103,7 @@ in
   };
 
   warnings = lib.optional (otherKinds != [ ]) (
-    "steward runs services only; these systemd.user units are not written: "
+    "steward runs services and targets only; these systemd.user units are not written: "
     + lib.concatMapStringsSep ", " (
       kind: "${kind} (${lib.concatStringsSep ", " (lib.attrNames config.systemd.user.${kind})})"
     ) otherKinds

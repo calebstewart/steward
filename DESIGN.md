@@ -377,7 +377,9 @@ home-manager runs on systemd, and has nothing to enable.
   control 128: the old manager hands its services over, and the instance
   starts again from the same path, as the new manager, which adopts them.
 - **`windowsModules.home`** writes home-manager's own
-  `systemd.user.services` as unit files in `%APPDATA%\steward\units`.
+  `systemd.user.services` and `systemd.user.targets` as unit files in
+  `%APPDATA%\steward\units` -- all but the targets steward has built in,
+  among them the `tray.target` home-manager declares everywhere.
   winpkgs evaluates home-manager's modules, so the option is there, and on
   Windows home-manager's systemd module is off, its units going nowhere.
   Units are free-form `Section.Key` attributes rendered as home-manager
