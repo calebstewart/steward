@@ -49,6 +49,11 @@ let
     ];
   };
 
+  # The same home with whkd's unit changed: its switch must run again.
+  changed = user.extendModules {
+    modules = [ { systemd.user.services.whkd.Service.Restart = lib.mkForce "on-failure"; } ];
+  };
+
   # Importing the module is all a home does; one that declares no services
   # gets no files.
   bare = winpkgs.lib.homeConfiguration {
@@ -107,6 +112,7 @@ in
     pkgs.runCommand "steward-winpkgs-home"
       {
         doc = document user;
+        changedDoc = document changed;
         bareDoc = document bare;
         closure = user.config.system.build.toplevel;
         nativeBuildInputs = [ pkgs.jq ];
@@ -115,7 +121,13 @@ in
         source=$(jq -r '.resources[] | select(.type == "winpkgs/file" and .properties.target == "%APPDATA%/steward/units/whkd.service") | .properties.source' <<<"$doc")
         test -n "$source"
         diff -u ${expectedUnit} "$closure/$source"
-        test "$(jq '[.resources[] | select(.id | test("steward"))] | length' <<<"$bareDoc")" = 0
+        test "$(jq '[.resources[] | select(.type == "winpkgs/file" and (.id | test("steward")))] | length' <<<"$bareDoc")" = 0
+
+        # The switch after an apply: last, and again when a unit changes.
+        switch() { jq -r --arg f "$2" '.resources[] | select(.id == "Activation steward") | .properties[$f]' <<<"$1"; }
+        test "$(jq -r '.resources[-1].id' <<<"$doc")" = 'Activation steward'
+        [[ "$(switch "$doc" command)" == *'stewctl switch --if-running'* ]]
+        test "$(switch "$doc" revision)" != "$(switch "$changedDoc" revision)"
         touch $out
       '';
 }

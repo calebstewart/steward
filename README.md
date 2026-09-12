@@ -44,7 +44,7 @@ stewctl                    # list the units
 stewctl status whkd        # one unit in detail, with the end of its log
 stewctl start|stop|restart whkd
 stewctl logs -f whkd       # its output, and steward's lines about it
-stewctl switch             # re-read the units; restart the changed, start the wanted
+stewctl switch             # re-read the units; restart the changed, start the new
 ```
 
 Each unit's output goes to `%LOCALAPPDATA%\steward\logs\<unit>.log`; the
@@ -113,8 +113,9 @@ systemd.user.services.whkd = {
 A system apply installs steward in `C:\Program Files\steward` (on the
 machine PATH) and registers the template; the first manager starts at the
 next sign-in. A later build is installed in place and the running managers
-hand their services to the new one. After a home apply, run `stewctl switch`
-for the running manager to pick up the changed units.
+hand their services to the new one. A home apply that changes the units runs
+`stewctl switch`, so the running manager restarts what changed, starts what
+is new and stops what is gone; a unit you stopped stays stopped.
 
 ## Installing it as a per-user service by hand
 

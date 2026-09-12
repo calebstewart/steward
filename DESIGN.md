@@ -363,10 +363,13 @@ home-manager runs on systemd, and has nothing to enable.
   Units are free-form `Section.Key` attributes rendered as home-manager
   renders them, which steward reads as systemd would; `X-Restart-Triggers=`
   and `X-Reload-Triggers=`, which name store paths, are written as their
-  hash, so a changed trigger still changes the file. After an apply,
-  `stewctl switch` makes the running manager follow the files, as
-  home-manager runs `sd-switch` -- by hand until winpkgs can run a command
-  after an apply (winpkgs#13).
+  hash, so a changed trigger still changes the file. The module also
+  declares a winpkgs activation, triggered by the rendered units, that runs
+  `stewctl switch --if-running` at the end of an apply that changed them --
+  after pruning, so a removed unit's file is gone -- as home-manager runs
+  `sd-switch`. `--if-running` makes no manager in the session a success (the
+  next one reads the files as they are), and without `stewctl` on the PATH
+  it does nothing, so a home applied before the system is harmless.
 
 Binaries that pass through winpkgs must not contain `/nix/store/` (its closure
 build refuses such files); Rust embeds source paths in panic locations, so the
@@ -390,8 +393,8 @@ build remaps them.
   `restartControl`; exercised on the machine: template registered, an
   instance at sign-in, a handover under the same PIDs, stop-all at
   sign-out), the two modules (written; their evaluation and closures are
-  flake checks), replacing a running binary in winpkgs, and running
-  `stewctl switch` after an apply (winpkgs#13).
+  flake checks), replacing a running binary in winpkgs (done), and running
+  `stewctl switch` after an apply (winpkgs' activations).
 - **M4** -- move whkd, komorebi, masir, Flow Launcher and thide off Run keys.
 - **Later** -- timers, event triggers.
 

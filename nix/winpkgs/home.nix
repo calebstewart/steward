@@ -14,8 +14,8 @@
 # registers steward (the system module), and importing this module is what
 # makes a home's systemd.user.services steward's units -- as declaring them
 # is all it takes where home-manager runs on systemd. A home that declares
-# none gets no files. After an apply, `stewctl switch` makes the running
-# manager follow them -- by hand until winpkgs can run it (winpkgs#13).
+# none gets no files. An apply that changes them runs `stewctl switch`, as
+# home-manager runs sd-switch, so the running manager follows them.
 {
   config,
   lib,
@@ -79,6 +79,18 @@ in
       text = render unit;
     }
   ) units;
+
+  # Run when the units change -- all of them gone included, so their services
+  # stop. Harmless before steward is: without stewctl on the PATH there is
+  # nothing to tell, and with no manager in the session (--if-running) the
+  # next one reads the files as they are.
+  winpkgs.activation.steward = {
+    command = "if (Get-Command stewctl -ErrorAction Ignore) { stewctl switch --if-running }";
+    triggers = lib.mapAttrsToList (name: unit: {
+      inherit name;
+      text = render unit;
+    }) units;
+  };
 
   warnings = lib.optional (otherKinds != [ ]) (
     "steward runs services only; these systemd.user units are not written: "
