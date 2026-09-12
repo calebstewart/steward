@@ -1,10 +1,16 @@
-//! The pipe: its name, the user it belongs to, and both of its ends.
+//! The pipe: its name, the user and session it belongs to, and both of its
+//! ends.
+//!
+//! A manager belongs to a session, as the desktop its services run on does,
+//! so the name carries both: `\\.\pipe\steward-<user SID>-<session>`. A user
+//! signed in twice has two managers, and a session signing in while the last
+//! one is still stopping its services does not wait for it.
 //!
 //! The server end is a single instance created with
 //! `FILE_FLAG_FIRST_PIPE_INSTANCE` and a DACL that admits only the user, and
 //! it is reused client after client, so the name is never free for someone
-//! else to take. That also makes it the manager's lock: a second manager for
-//! the same user cannot create it, and does not start.
+//! else to take. That also makes it the manager's lock: a second manager in
+//! the same session cannot create it, and does not start.
 //!
 //! The client opens it at `SecurityIdentification`, so the server cannot act
 //! as the user, and checks the serving process's user before sending anything.
@@ -37,8 +43,10 @@ use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId,
     WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
+use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 use crate::{Request, Response, MAX_MESSAGE};
@@ -95,9 +103,19 @@ pub fn user_sid() -> io::Result<String> {
     token_user(unsafe { GetCurrentProcess() })
 }
 
-/// `\\.\pipe\steward-<user SID>`.
+/// The session this process runs in.
+pub fn session() -> io::Result<u32> {
+    let mut session = 0;
+    if unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(session)
+}
+
+/// `\\.\pipe\steward-<user SID>-<session>`: this user's manager in this
+/// process's session.
 pub fn name() -> io::Result<String> {
-    Ok(format!(r"\\.\pipe\steward-{}", user_sid()?))
+    Ok(format!(r"\\.\pipe\steward-{}-{}", user_sid()?, session()?))
 }
 
 /// The manager's end of the pipe.
@@ -107,10 +125,11 @@ pub struct Server {
 
 impl Server {
     /// Create the pipe. Fails with `AlreadyExists` if it exists: another
-    /// manager is running for this user (or someone has taken the name).
+    /// manager is running for this user in this session (or someone has
+    /// taken the name).
     pub fn create() -> io::Result<Server> {
         let sid = user_sid()?;
-        let name = wide(&format!(r"\\.\pipe\steward-{sid}"));
+        let name = wide(&name()?);
         let sddl = wide(&format!("D:P(A;;GA;;;{sid})"));
         unsafe {
             let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
@@ -145,7 +164,7 @@ impl Server {
                 if error == 5 || error == ERROR_PIPE_BUSY {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
-                        "the pipe already exists: another steward is running for this user",
+                        "the pipe already exists: another steward is running in this session",
                     ));
                 }
                 return Err(io::Error::from_raw_os_error(error as i32));
@@ -193,7 +212,7 @@ impl Drop for HangUp {
 
 #[derive(Debug)]
 pub enum ClientError {
-    /// No manager is running for this user.
+    /// No manager is running for this user in this session.
     NotRunning,
     /// The pipe is served by a process of another user.
     Impostor(String),
@@ -204,7 +223,7 @@ pub enum ClientError {
 impl fmt::Display for ClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ClientError::NotRunning => write!(f, "steward is not running"),
+            ClientError::NotRunning => write!(f, "steward is not running in this session"),
             ClientError::Impostor(who) => write!(
                 f,
                 "the steward pipe is served by a process of another user ({who}); not talking to it"

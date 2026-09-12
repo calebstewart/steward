@@ -74,7 +74,7 @@ steward --console
 
 runs the manager in the foreground until Ctrl+C, which stops every service
 (a second Ctrl+C leaves them running for the next manager to adopt). Only one
-manager runs per user. To try it without touching your own directories, point
+manager runs per session. To try it without touching your own directories, point
 `APPDATA` and `LOCALAPPDATA` at scratch directories in that console first: the
 unit directory, logs and state follow them (the services still get your real
 environment).

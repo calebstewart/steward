@@ -1,7 +1,10 @@
 //! What a restarted manager needs to take its services back: for each running
-//! service, every process in its job and which of them is the main one. Written on every change to
-//! `%LOCALAPPDATA%\steward\state.json` (a temporary file renamed over the old,
-//! so a crash mid-write leaves the previous state rather than half of one).
+//! service, every process in its job and which of them is the main one.
+//! Written on every change to `%LOCALAPPDATA%\steward\state-<session>.json` (a
+//! temporary file renamed over the old, so a crash mid-write leaves the
+//! previous state rather than half of one), and removed when nothing is left
+//! running. One per session, as managers are: a session's services are its
+//! own manager's to adopt.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -28,8 +31,8 @@ pub struct SavedProcess {
     pub created: u64,
 }
 
-pub fn path(state_dir: &Path) -> PathBuf {
-    state_dir.join("state.json")
+pub fn path(state_dir: &Path, session: u32) -> PathBuf {
+    state_dir.join(format!("state-{session}.json"))
 }
 
 /// The saved state, or nothing if there is none or it cannot be read.
@@ -41,7 +44,15 @@ pub fn load(path: &Path) -> Result<Saved, String> {
     }
 }
 
+/// Record `saved`; with nothing running there is nothing to record, and the
+/// file goes.
 pub fn save(path: &Path, saved: &Saved) -> io::Result<()> {
+    if saved.units.is_empty() {
+        return match std::fs::remove_file(path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
     let temporary = path.with_extension("json.tmp");
     std::fs::write(&temporary, serde_json::to_vec_pretty(saved)?)?;
     std::fs::rename(&temporary, path)
@@ -55,7 +66,8 @@ mod tests {
     fn round_trip_and_absence() {
         let dir = std::env::temp_dir().join(format!("steward-state-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let file = path(&dir);
+        let file = path(&dir, 3);
+        assert!(file.ends_with("state-3.json"));
         assert_eq!(load(&file).unwrap(), Saved::default());
         let mut saved = Saved::default();
         saved.units.insert(
@@ -79,6 +91,10 @@ mod tests {
         );
         save(&file, &saved).unwrap();
         assert_eq!(load(&file).unwrap(), saved);
+        // Nothing running: no file, and none needed to say so.
+        save(&file, &Saved::default()).unwrap();
+        assert!(!file.exists());
+        save(&file, &Saved::default()).unwrap();
         std::fs::write(&file, "not json").unwrap();
         assert!(load(&file).is_err());
         std::fs::remove_dir_all(&dir).unwrap();

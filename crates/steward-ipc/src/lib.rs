@@ -1,5 +1,6 @@
 //! How `stewctl` talks to `steward`: one request, one response, each a line
-//! of JSON, over the named pipe `\\.\pipe\steward-<user SID>` (see [`pipe`]).
+//! of JSON, over the named pipe `\\.\pipe\steward-<user SID>-<session>` (see
+//! [`pipe`]).
 //!
 //! The pipe admits only the user who owns it, refuses remote clients, and the
 //! client checks that the process serving it runs as that user before it
@@ -66,6 +67,9 @@ impl Response {
 pub struct ManagerStatus {
     pub version: String,
     pub pid: u32,
+    /// The session it manages.
+    #[serde(default)]
+    pub session: u32,
     /// Whether the shell is ready (`graphical-session.target` reached).
     pub graphical_session: bool,
     pub unit_dir: String,

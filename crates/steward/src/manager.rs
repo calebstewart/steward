@@ -136,14 +136,20 @@ struct Manager {
     next_serial: usize,
     dirty: bool,
     state_dir: Option<PathBuf>,
+    /// The session this manager belongs to, and its services with it.
+    session: u32,
     stdin: Option<OwnedHandle>,
 }
 
 /// Run the manager until it is told to stop or detach. `controls` is the
 /// sending end of `inbox`, for the control plane.
 pub fn run(port: Port, controls: Sender<Control>, inbox: Receiver<Control>) {
-    info!("steward {} starting", env!("CARGO_PKG_VERSION"));
-    // The pipe is also the lock: one manager per user.
+    let session = sys::own_session();
+    info!(
+        "steward {} starting in session {session}",
+        env!("CARGO_PKG_VERSION")
+    );
+    // The pipe is also the lock: one manager per session.
     if let Err(e) = control::listen(controls, port.waker()) {
         error!("cannot serve the control pipe: {e}; not starting");
         return;
@@ -161,6 +167,7 @@ pub fn run(port: Port, controls: Sender<Control>, inbox: Receiver<Control>) {
         next_serial: 1,
         dirty: false,
         state_dir: crate::log::state_dir(),
+        session,
         stdin: process::open_null()
             .map_err(|e| error!("cannot open NUL for services' stdin: {e}"))
             .ok(),
@@ -417,6 +424,7 @@ impl Manager {
         ManagerStatus {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             pid: std::process::id(),
+            session: self.session,
             graphical_session: self.graphical,
             unit_dir: text(steward_unit::user_unit_dir()),
             log_dir: text(self.state_dir.as_ref().map(|d| d.join("logs"))),
@@ -456,9 +464,9 @@ impl Manager {
 
     // ---- adoption -------------------------------------------------------
 
-    /// Take back the services a previous manager left running.
+    /// Take back the services a previous manager in this session left running.
     fn adopt(&mut self) {
-        let Some(path) = self.state_dir.as_deref().map(state::path) else {
+        let Some(path) = self.state_path() else {
             return;
         };
         let saved = state::load(&path).unwrap_or_else(|e| {
@@ -466,12 +474,19 @@ impl Manager {
             Saved::default()
         });
         for (name, record) in saved.units {
-            // The recorded processes that are still the same processes.
-            let alive: Vec<Child> = record
+            // The recorded processes that are still the same processes, and
+            // still in this session. A process in another session belongs to
+            // that session -- one signing out, perhaps, whose processes are
+            // about to be ended -- and is not this manager's to take.
+            let (alive, elsewhere): (Vec<Child>, Vec<Child>) = record
                 .processes
                 .iter()
                 .filter_map(|p| Child::open(p.pid, p.created).ok())
-                .collect();
+                .partition(|c| sys::session_of(c.pid) == Some(self.session));
+            if !elsewhere.is_empty() {
+                let pids: Vec<u32> = elsewhere.iter().map(|c| c.pid).collect();
+                warning!("{name}: processes {pids:?} are in another session; leaving them to it");
+            }
             if alive.is_empty() {
                 continue;
             }
@@ -1019,6 +1034,10 @@ impl Manager {
 
     // ---- files ----------------------------------------------------------
 
+    fn state_path(&self) -> Option<PathBuf> {
+        Some(state::path(self.state_dir.as_ref()?, self.session))
+    }
+
     fn log_path(&self, slot: usize) -> Option<PathBuf> {
         let dir = self.state_dir.as_ref()?.join("logs");
         std::fs::create_dir_all(&dir).ok()?;
@@ -1052,7 +1071,7 @@ impl Manager {
         if !std::mem::take(&mut self.dirty) {
             return;
         }
-        let Some(path) = self.state_dir.as_deref().map(state::path) else {
+        let Some(path) = self.state_path() else {
             return;
         };
         let mut saved = Saved::default();

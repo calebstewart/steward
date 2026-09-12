@@ -198,7 +198,10 @@ fn status(units: Vec<String>) -> Outcome {
             return Err("steward sent no status".into());
         };
         let count = |state: &str| response.units.iter().filter(|u| u.state == state).count();
-        println!("steward {} (pid {})", manager.version, manager.pid);
+        println!(
+            "steward {} (pid {}, session {})",
+            manager.version, manager.pid, manager.session
+        );
         println!(
             "   Shell: {}",
             if manager.graphical_session {

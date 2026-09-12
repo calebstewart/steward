@@ -112,6 +112,15 @@ processes are ended.
   restarts, which is how tray-icon services can be told to re-register.
 - **The service name is not an address.** It changes every sign-in; `stewctl`
   finds the manager through its named pipe.
+- **A manager belongs to a session, not to a user.** Its services run on the
+  session's desktop, and cannot move to another. Signing out and straight back
+  in overlaps two sessions of the same user -- the new one's instance starts
+  while the old one's is still stopping its services (5 s apart, observed) --
+  and a user can also be signed in twice, at the console and over Remote
+  Desktop. So the pipe, the state file and adoption are all per session: each
+  session's manager starts its own services and never takes another's. The
+  unit files and logs stay per user; two sessions running the same unit
+  write to the same log.
 - **Start and stop go through steward, not the SCM.** The user cannot stop the
   instance, and does not need to: the manager's lifecycle belongs to the
   system configuration (install, upgrade), the services' lifecycle to the
@@ -133,11 +142,11 @@ processes are ended.
    job object created *without* `KILL_ON_JOB_CLOSE`, so the jobs' processes
    outlive the manager's handles. The manager records every process in each
    job -- PID and creation time, since PIDs are reused and the pair is not --
-   and which is the main one, in `%LOCALAPPDATA%\steward\state.json`,
+   and which is the main one, in `%LOCALAPPDATA%\steward\state-<session>.json`,
    rewritten whenever a job's membership changes. A restarted manager opens
-   the recorded processes that are still the same processes and puts them in
-   a new job, which Windows nests inside the orphaned one; it adopts them
-   instead of starting duplicates.
+   the recorded processes that are still the same processes, and still in its
+   session, and puts them in a new job, which Windows nests inside the
+   orphaned one; it adopts them instead of starting duplicates.
 
    The first design named the jobs and re-opened them by name. That does not
    work: a job's name goes with its last handle, even while its processes run
@@ -218,8 +227,9 @@ template.
 
 ## Control plane
 
-A named pipe, `\\.\pipe\steward-<user SID>`, whose DACL admits only the user
-and which refuses remote clients. The manager creates its single instance
+A named pipe, `\\.\pipe\steward-<user SID>-<session>`, whose DACL admits
+only the user and which refuses remote clients; `stewctl` talks to the
+manager of the session it runs in. The manager creates its single instance
 with `FILE_FLAG_FIRST_PIPE_INSTANCE` and reuses it client after client, so the
 name is never free to take; `stewctl` opens it at `SecurityIdentification`
 and checks that the process serving it runs as the user before sending
@@ -227,7 +237,7 @@ anything. One request and one response, each a line of JSON
 (`steward-ipc`). A thread serves the pipe and hands each request to the
 manager's loop, so the manager's state stays on one thread.
 
-The pipe is also the manager's lock: a second manager for the same user
+The pipe is also the manager's lock: a second manager in the same session
 cannot create it and does not start (a `--console` manager while the
 per-user service runs, say). Pipe names are machine-wide, so another account
 could take the name first and keep steward from starting; not a concern on a
