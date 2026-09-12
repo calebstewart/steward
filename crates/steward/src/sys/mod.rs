@@ -1,11 +1,13 @@
 //! The Windows half of supervision: jobs, processes, the completion port the
-//! manager waits on, environments, and asking programs to exit. Each module is
-//! a thin, safe wrapper over the Win32 calls it names.
+//! manager waits on, environments, asking programs to exit, and Explorer's
+//! readiness. Each module is a thin, safe wrapper over the Win32 calls it
+//! names.
 
 pub mod env;
 pub mod job;
 pub mod port;
 pub mod process;
+pub mod shell;
 pub mod signal;
 
 use std::ffi::OsStr;
@@ -16,7 +18,6 @@ use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
-use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
 
 /// A NUL-terminated UTF-16 copy of `s`.
 pub fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
@@ -49,11 +50,4 @@ pub fn session_of(pid: u32) -> Option<u32> {
 /// The session this process runs in.
 pub fn own_session() -> u32 {
     session_of(std::process::id()).unwrap_or(u32::MAX)
-}
-
-/// Explorer's taskbar exists: the shell is ready, and with it
-/// graphical-session.target.
-pub fn shell_ready() -> bool {
-    let class = wide("Shell_TrayWnd");
-    unsafe { !FindWindowW(class.as_ptr(), std::ptr::null()).is_null() }
 }

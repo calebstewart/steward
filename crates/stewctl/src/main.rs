@@ -248,6 +248,14 @@ fn status(units: Vec<String>) -> Outcome {
                 "not ready yet"
             }
         );
+        println!(
+            "    Tray: {}",
+            if manager.tray {
+                "ready (tray.target reached)"
+            } else {
+                "not ready yet"
+            }
+        );
         println!("   Units: {} in {}", response.units.len(), manager.unit_dir);
         println!(
             "          {} active, {} failed, {} restarting",

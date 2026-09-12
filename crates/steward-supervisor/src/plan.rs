@@ -1,12 +1,12 @@
 //! Which units start when, and in what order, and what stops with what.
 //!
-//! Three targets are built in. `default.target` is reached as soon as the
-//! manager is up, at sign-in. `graphical-session.target` is reached once the
-//! shell is ready -- Explorer's taskbar exists -- which the manager finds out
-//! for itself; before that there are no windows to manage and no tray to sit
-//! in. `tray.target` is another name for it. A unit is started when a target
-//! it is `WantedBy=` is reached, along with everything it `Wants=` or
-//! `Requires=`.
+//! Three targets are built in, and the manager finds out for itself when each
+//! is reached. `default.target` is reached as soon as the manager is up, at
+//! sign-in. `graphical-session.target` is reached once the shell is ready --
+//! Explorer's taskbar exists -- before which there are no windows to manage.
+//! `tray.target` is reached once the tray takes icons, a moment later. A unit
+//! is started when a target it is `WantedBy=` is reached, along with
+//! everything it `Wants=` or `Requires=`.
 //!
 //! Any other target is a unit file of its own, a unit that runs nothing, and
 //! in the plan it is a unit like any other: `WantedBy=` it is its `Wants=`,
@@ -36,18 +36,9 @@ pub use steward_unit::{DEFAULT_TARGET, GRAPHICAL_TARGET, TRAY_TARGET};
 use crate::machine::State;
 
 /// Reached by the manager, not started: `default.target`,
-/// `graphical-session.target`, and `tray.target` (which is the latter).
+/// `graphical-session.target`, and `tray.target`.
 fn is_builtin(name: &str) -> bool {
     BUILTIN_TARGETS.contains(&name)
-}
-
-/// The name a unit's dependency means: `tray.target` is the shell's.
-fn canonical(name: &str) -> String {
-    if name == TRAY_TARGET {
-        GRAPHICAL_TARGET.to_owned()
-    } else {
-        name.to_owned()
-    }
 }
 
 /// Where a unit is, as far as ordering cares.
@@ -111,7 +102,7 @@ pub struct Plan {
 }
 
 fn names(list: &[String]) -> BTreeSet<String> {
-    list.iter().map(|n| canonical(n)).collect()
+    list.iter().cloned().collect()
 }
 
 impl Plan {
@@ -208,7 +199,7 @@ impl Plan {
     /// the units that require it or are part of it, and so on. Not `unit`.
     pub fn bound_to(&self, unit: &str) -> BTreeSet<String> {
         let mut found = BTreeSet::new();
-        let mut todo = vec![canonical(unit)];
+        let mut todo = vec![unit.to_owned()];
         while let Some(name) = todo.pop() {
             for (other, node) in &self.nodes {
                 if (node.requires.contains(&name) || node.part_of.contains(&name))
@@ -624,28 +615,39 @@ mod tests {
     }
 
     #[test]
-    fn tray_target_is_the_shell_s() {
-        let services = [unit(
-            "applet.service",
-            "After=tray.target\nRequires=tray.target",
-            "WantedBy=tray.target",
-        )];
+    fn tray_target_is_its_own_and_comes_after_the_shell() {
+        let services = [
+            unit(
+                "applet.service",
+                "After=tray.target\nRequires=tray.target",
+                "WantedBy=tray.target",
+            ),
+            // As home-manager writes a tray program: pulled in with the
+            // session, ordered after the tray.
+            unit(
+                "hm-applet.service",
+                "After=graphical-session.target tray.target",
+                "WantedBy=graphical-session.target",
+            ),
+        ];
         let (plan, warnings) = Plan::new(&services);
         assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(plan.pulled_in_by(TRAY_TARGET), set(&["applet.service"]));
         assert_eq!(
             plan.pulled_in_by(GRAPHICAL_TARGET),
-            set(&["applet.service"])
+            set(&["hm-applet.service"])
         );
         let mut sim = Sim::new(&services);
-        let mut waiting = set(&["applet.service"]);
+        let mut waiting = set(&["applet.service", "hm-applet.service"]);
+        sim.reached.insert(GRAPHICAL_TARGET.into());
         sim.start(&mut waiting, &[]);
         assert!(
             sim.rounds.is_empty(),
-            "waits for the shell, and does not fail"
+            "both wait for the tray, and neither fails"
         );
-        sim.reached.insert(GRAPHICAL_TARGET.into());
+        sim.reached.insert(TRAY_TARGET.into());
         sim.start(&mut waiting, &[]);
-        assert_eq!(sim.rounds, [vec!["applet.service"]]);
+        assert_eq!(sim.rounds, [vec!["applet.service", "hm-applet.service"]]);
     }
 
     #[test]
