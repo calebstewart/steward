@@ -15,6 +15,37 @@ use clap::{Parser, Subcommand};
 use steward_ipc::{Request, Response, UnitStatus};
 use steward_unit::{LoadedUnit, Severity};
 
+/// Everything stewctl prints goes through this rather than std's `println!`,
+/// which panics when the reader has gone -- `stewctl logs whkd | Select-Object
+/// -First 3`, or a pager that is quit. Defined here, it is the `println!` the
+/// whole file uses.
+macro_rules! println {
+    () => {
+        $crate::print_line(format_args!(""))
+    };
+    ($($arg:tt)*) => {
+        $crate::print_line(format_args!($($arg)*))
+    };
+}
+
+fn print_line(args: std::fmt::Arguments) {
+    let mut out = std::io::stdout().lock();
+    if let Err(e) = out.write_fmt(args).and_then(|()| out.write_all(b"\n")) {
+        stdout_failed(e);
+    }
+}
+
+/// The reader stopped reading: stop too, successfully, as `head` ends `cat`
+/// on Unix. Any other failure to write is reported.
+fn stdout_failed(e: std::io::Error) -> ! {
+    // ERROR_NO_DATA ("the pipe is being closed") and ERROR_BROKEN_PIPE.
+    if e.kind() == std::io::ErrorKind::BrokenPipe || matches!(e.raw_os_error(), Some(232 | 109)) {
+        std::process::exit(0);
+    }
+    eprintln!("stewctl: cannot write the output: {e}");
+    std::process::exit(1);
+}
+
 #[derive(Parser)]
 #[command(
     version,
@@ -562,8 +593,13 @@ fn logs(unit: &str, lines: usize, follow: bool) -> Outcome {
         if file.seek(SeekFrom::Start(offset)).is_ok() && file.read_to_end(&mut buffer).is_ok() {
             offset += buffer.len() as u64;
             let mut out = stdout.lock();
-            let _ = out.write_all(String::from_utf8_lossy(&buffer).as_bytes());
-            let _ = out.flush();
+            // Following ends with the reader, not never.
+            if let Err(e) = out
+                .write_all(String::from_utf8_lossy(&buffer).as_bytes())
+                .and_then(|()| out.flush())
+            {
+                stdout_failed(e);
+            }
         }
     }
 }
