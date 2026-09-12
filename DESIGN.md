@@ -419,7 +419,16 @@ build remaps them.
   (moved aside, the trash emptied once the old manager had handed over) and
   restarted the instance onto it, and a home apply that wrote a unit and ran
   `stewctl switch`.
-- **M4** -- move whkd, komorebi, masir, Flow Launcher and thide off Run keys.
+- **M4** (done) -- the desktop's daemons off Run keys. winpkgs' `programs.whkd`,
+  `programs.komorebi` and `programs.masir` gained `service.enable`, declaring
+  them as `systemd.user.services` (komorebi.exe directly, stopped with
+  `komorebic stop`, a unit per bar part of it); on gaming-windows they run in
+  a `tiling.target` group, and thide on `tray.target`. Flow Launcher stays on
+  its Run entry: its stub starts the versioned program and exits, and what
+  the user launches from Flow is Flow's child, which a supervisor would stop
+  with it. The first start showed the readiness question below in practice:
+  the bars came up before komorebi listened, failed, and were restarted a
+  second later.
 - **Later** -- timers, event triggers.
 
 ## Open questions

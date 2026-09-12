@@ -9,8 +9,8 @@ and tells you what they are doing.
 
 See [DESIGN.md](DESIGN.md) for the design, what has been established on a real
 machine, and the roadmap. Supervision (M1) and the control plane (M2) are
-done, and so is integration with winpkgs (M3); moving the desktop's daemons
-onto it (M4) is next.
+done, and so are integration with winpkgs (M3) and the desktop's daemons
+running under it (M4).
 
 ## Units
 
