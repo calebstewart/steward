@@ -334,8 +334,9 @@ steward is its own flake. It exports the Windows binaries, cross-built
 (`pkgsCross.mingwW64`; they import nothing but Windows' own DLLs), an
 overlay for package sets that already target Windows, such as `pkgs` inside a
 winpkgs module, and two winpkgs modules as `windowsModules` (winpkgs' own
-name for its module trees), for a consumer to import. Both are
-`services.steward.enable`.
+name for its module trees), for a consumer to import. The system sets steward
+up (`services.steward.enable`); a home only declares units, as it would where
+home-manager runs on systemd, and has nothing to enable.
 
 - **`windowsModules.system`** installs `steward.exe` and `stewctl.exe` in a
   fixed directory (`C:\Program Files\steward`), puts it on the machine PATH,

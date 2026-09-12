@@ -97,9 +97,8 @@ steward = {
 imports = [ inputs.steward.windowsModules.system ];
 services.steward.enable = true;
 
-# the home configuration
+# the home configuration: nothing to enable, only units to declare
 imports = [ inputs.steward.windowsModules.home ];
-services.steward.enable = true;
 systemd.user.services.whkd = {
   Unit.Description = "Hotkey daemon";
   Unit.After = [ "graphical-session.target" ];

@@ -10,16 +10,18 @@
 # line; a unit that names a Nix store path cannot work on Windows, and winpkgs
 # refuses to write one.
 #
-# The system configuration installs steward (the system module); this writes
-# units. After an apply, `stewctl switch` makes the running manager follow
-# them -- by hand until winpkgs can run it (winpkgs#13).
+# There is nothing to enable: the system configuration installs and
+# registers steward (the system module), and importing this module is what
+# makes a home's systemd.user.services steward's units -- as declaring them
+# is all it takes where home-manager runs on systemd. A home that declares
+# none gets no files. After an apply, `stewctl switch` makes the running
+# manager follow them -- by hand until winpkgs can run it (winpkgs#13).
 {
   config,
   lib,
   ...
 }:
 let
-  cfg = config.services.steward;
   units = config.systemd.user.services;
 
   # home-manager's toSystemdIni: booleans as true/false, lists as repeated keys.
@@ -69,26 +71,19 @@ let
   ];
 in
 {
-  options.services.steward.enable = lib.mkEnableOption ''
-    steward's units: home-manager's `systemd.user.services`, written for
-    steward to run. steward itself is installed by the system configuration
-  '';
+  # Under AppData/Roaming, which winpkgs writes as %APPDATA%: where steward
+  # reads units, wherever xdg.configHome points.
+  home.file = lib.mapAttrs' (
+    name: unit:
+    lib.nameValuePair "AppData/Roaming/steward/units/${name}.service" {
+      text = render unit;
+    }
+  ) units;
 
-  config = lib.mkIf cfg.enable {
-    # Under AppData/Roaming, which winpkgs writes as %APPDATA%: where steward
-    # reads units, wherever xdg.configHome points.
-    home.file = lib.mapAttrs' (
-      name: unit:
-      lib.nameValuePair "AppData/Roaming/steward/units/${name}.service" {
-        text = render unit;
-      }
-    ) units;
-
-    warnings = lib.optional (otherKinds != [ ]) (
-      "steward runs services only; these systemd.user units are not written: "
-      + lib.concatMapStringsSep ", " (
-        kind: "${kind} (${lib.concatStringsSep ", " (lib.attrNames config.systemd.user.${kind})})"
-      ) otherKinds
-    );
-  };
+  warnings = lib.optional (otherKinds != [ ]) (
+    "steward runs services only; these systemd.user units are not written: "
+    + lib.concatMapStringsSep ", " (
+      kind: "${kind} (${lib.concatStringsSep ", " (lib.attrNames config.systemd.user.${kind})})"
+    ) otherKinds
+  );
 }

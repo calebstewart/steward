@@ -29,7 +29,6 @@ let
       self.windowsModules.home
       {
         winpkgs.name = "user@check";
-        services.steward.enable = true;
         systemd.user.services.whkd = {
           Unit = {
             Description = "Hotkey daemon";
@@ -47,6 +46,16 @@ let
           Install.WantedBy = [ "graphical-session.target" ];
         };
       }
+    ];
+  };
+
+  # Importing the module is all a home does; one that declares no services
+  # gets no files.
+  bare = winpkgs.lib.homeConfiguration {
+    inherit system;
+    modules = [
+      self.windowsModules.home
+      { winpkgs.name = "bare@check"; }
     ];
   };
 
@@ -98,6 +107,7 @@ in
     pkgs.runCommand "steward-winpkgs-home"
       {
         doc = document user;
+        bareDoc = document bare;
         closure = user.config.system.build.toplevel;
         nativeBuildInputs = [ pkgs.jq ];
       }
@@ -105,6 +115,7 @@ in
         source=$(jq -r '.resources[] | select(.type == "winpkgs/file" and .properties.target == "%APPDATA%/steward/units/whkd.service") | .properties.source' <<<"$doc")
         test -n "$source"
         diff -u ${expectedUnit} "$closure/$source"
+        test "$(jq '[.resources[] | select(.id | test("steward"))] | length' <<<"$bareDoc")" = 0
         touch $out
       '';
 }
