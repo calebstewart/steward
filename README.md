@@ -19,6 +19,13 @@ cargo build --release
 cargo test
 ```
 
+With Nix (on Linux or in WSL), cross-compiled for Windows:
+
+```
+nix build          # result/bin/steward.exe, result/bin/stewctl.exe
+nix flake check    # the parser's tests natively, and the Windows build
+```
+
 ## Trying the manager without installing it
 
 ```

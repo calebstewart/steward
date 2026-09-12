@@ -232,10 +232,10 @@ Built-in targets: `default.target` (sign-in) and `graphical-session.target`
 
 ## Nix and winpkgs
 
-steward is its own flake. It exports:
-
-- the Windows binaries, cross-built (`pkgsCross.mingwW64`);
-- winpkgs modules, for a consumer to import:
+steward is its own flake. It exports the Windows binaries, cross-built
+(`pkgsCross.mingwW64`; they import nothing but Windows' own DLLs), and an
+overlay for package sets that already target Windows, such as `pkgs` inside a
+winpkgs module. M3 adds winpkgs modules, for a consumer to import:
   - **system**: put `steward.exe` in `%ProgramFiles%\steward` and register the
     template. winpkgs has no resource for registering a service yet; one is
     needed (`sc create`/`sc config`/`sc failure`, stopping instances around a
