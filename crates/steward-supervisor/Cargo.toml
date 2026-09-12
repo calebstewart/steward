@@ -1,0 +1,10 @@
+[package]
+name = "steward-supervisor"
+description = "steward's service state machine, restart policy and start ordering, without any Windows in it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+steward-unit.workspace = true

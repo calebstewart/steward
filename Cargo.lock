@@ -150,6 +150,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "steward-supervisor"
+version = "0.1.0"
+dependencies = [
+ "steward-unit",
+]
+
+[[package]]
 name = "steward-unit"
 version = "0.1.0"
 

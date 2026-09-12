@@ -1,8 +1,8 @@
-# steward-unit's tests, natively: the parser is plain Rust and the only crate
-# whose tests mean anything off Windows.
+# The tests of the crates with no Windows in them -- the unit parser and the
+# supervisor's state machine -- run natively.
 { lib, rustPlatform }:
 rustPlatform.buildRustPackage {
-  pname = "steward-unit-tests";
+  pname = "steward-native-tests";
   inherit ((lib.importTOML ../Cargo.toml).workspace.package) version;
 
   src = lib.fileset.toSource {
@@ -18,10 +18,14 @@ rustPlatform.buildRustPackage {
   cargoBuildFlags = [
     "-p"
     "steward-unit"
+    "-p"
+    "steward-supervisor"
   ];
   cargoTestFlags = [
     "-p"
     "steward-unit"
+    "-p"
+    "steward-supervisor"
   ];
 
   # A library has nothing to install; the check passing is the product.
