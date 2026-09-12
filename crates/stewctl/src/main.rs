@@ -64,7 +64,12 @@ enum Command {
     /// Read the unit files again and make what runs match them, as sd-switch
     /// does: restart the changed, start the new, stop the removed; a unit
     /// stopped on purpose stays stopped. What an apply runs.
-    Switch,
+    Switch {
+        /// Succeed, doing nothing, when no manager runs in this session:
+        /// the next one to start reads the units as they are.
+        #[arg(long)]
+        if_running: bool,
+    },
     /// Show a unit's log: its output and steward's lines about it.
     Logs {
         unit: String,
@@ -90,7 +95,7 @@ fn main() -> ExitCode {
         Command::Restart { units, no_block } => restart(names(units), no_block),
         Command::IsActive { units } => is_active(names(units)),
         Command::DaemonReload => simple(Request::Reload { apply: false }),
-        Command::Switch => simple(Request::Reload { apply: true }),
+        Command::Switch { if_running } => switch(if_running),
         Command::Logs {
             unit,
             lines,
@@ -411,10 +416,15 @@ fn log_view() -> Result<LogView, String> {
 }
 
 /// The status of every unit, or `None` if no manager is running.
-#[cfg(windows)]
 fn manager_status() -> Result<Option<Response>, String> {
-    use steward_ipc::pipe::{request, ClientError};
-    match request(&Request::Status { units: Vec::new() }) {
+    ask_if_running(Request::Status { units: Vec::new() })
+}
+
+/// The manager's answer, or `None` if no manager is running.
+#[cfg(windows)]
+fn ask_if_running(request: Request) -> Result<Option<Response>, String> {
+    use steward_ipc::pipe::ClientError;
+    match steward_ipc::pipe::request(&request) {
         Ok(Response {
             error: Some(error), ..
         }) => Err(error),
@@ -425,8 +435,28 @@ fn manager_status() -> Result<Option<Response>, String> {
 }
 
 #[cfg(not(windows))]
-fn manager_status() -> Result<Option<Response>, String> {
+fn ask_if_running(_request: Request) -> Result<Option<Response>, String> {
     Ok(None)
+}
+
+/// `switch`; with `if_running`, no manager is not an error: the next one to
+/// start reads the units as they are. What an apply runs.
+fn switch(if_running: bool) -> Outcome {
+    let request = Request::Reload { apply: true };
+    if !if_running {
+        return simple(request);
+    }
+    match ask_if_running(request)? {
+        Some(response) => {
+            for message in response.messages {
+                println!("{message}");
+            }
+        }
+        None => println!(
+            "steward is not running in this session; the next manager reads the units as they are"
+        ),
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Edit distance, for suggesting the unit someone meant.
