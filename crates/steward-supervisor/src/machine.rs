@@ -188,6 +188,14 @@ impl Machine {
         self.deadline
     }
 
+    /// Do not start after all: a unit this one requires failed.
+    pub fn refuse(&mut self, outcome: Outcome) {
+        if matches!(self.state, State::Inactive | State::Failed) {
+            self.last = Some(outcome);
+            self.state = State::Failed;
+        }
+    }
+
     /// Take over a service that was already running when the manager started
     /// (the manager crashed or was upgraded and its job survived).
     pub fn adopt(&mut self, main_alive: bool, now: Instant) -> Vec<Action> {
