@@ -102,6 +102,26 @@ pub struct UnitStatus {
     pub wanted_by: Vec<String>,
     /// Its unit file changed and it has not been restarted since.
     pub changed: bool,
+    /// A timer's schedule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timer: Option<TimerStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimerStatus {
+    /// What it starts.
+    pub unit: String,
+    /// `waiting` for its next elapse, `running` (it elapsed, and its unit has
+    /// not come to rest yet), or `elapsed` (nothing more is due); empty while
+    /// the timer is not active.
+    pub state: String,
+    /// When it next elapses, local time.
+    pub next: Option<String>,
+    /// How long until then; negative when it is due.
+    pub next_in_secs: Option<f64>,
+    /// When it last elapsed, local time.
+    pub last: Option<String>,
+    pub last_secs_ago: Option<u64>,
 }
 
 impl UnitStatus {

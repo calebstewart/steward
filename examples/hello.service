@@ -1,0 +1,9 @@
+# What hello.timer starts: a oneshot that prints a line into its log and
+# exits. It has no [Install] section; the timer is what starts it.
+
+[Unit]
+Description=Prints the time into its log
+
+[Service]
+Type=oneshot
+ExecStart=cmd.exe /d /c "echo hello at %TIME%"

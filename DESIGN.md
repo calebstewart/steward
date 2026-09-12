@@ -56,7 +56,6 @@ cannot see or stop is its own problem.
 
 ### Later, with room left for them now
 
-- Timers (replacing per-user Scheduled Tasks).
 - Event triggers: lock/unlock, sign-in/out, power source, network, display
   changes, file changes.
 
@@ -243,10 +242,10 @@ per-user service runs, say). Pipe names are machine-wide, so another account
 could take the name first and keep steward from starting; not a concern on a
 single-user machine, noted for others.
 
-The verbs follow `systemctl`: `list-units` (the default), `status [unit...]`,
-`start`, `stop`, `restart` (waiting for the units to settle unless
-`--no-block`), `is-active`, `daemon-reload`, and `logs [-f] [-n N]`, which
-reads the log file itself. `whkd` means `whkd.service`. Two differ:
+The verbs follow `systemctl`: `list-units` (the default), `list-timers`,
+`status [unit...]`, `start`, `stop`, `restart` (waiting for the units to
+settle unless `--no-block`), `is-active`, `daemon-reload`, and
+`logs [-f] [-n N]`, which reads the log file itself. `whkd` means `whkd.service`. Two differ:
 
 - **`switch`** reads the unit files and makes what runs match them, as
   home-manager's `sd-switch` does: removed units stop, changed running units
@@ -271,7 +270,7 @@ carries over. It is familiar, pleasant to write by hand, and home-manager
 already renders `systemd.user.services` in exactly this form.
 
 They live in `%APPDATA%\steward\units\*.service` (the XDG config home, as
-winpkgs lays it out on Windows).
+winpkgs lays it out on Windows), with `*.target` and `*.timer` beside them.
 
 ```ini
 [Unit]
@@ -304,7 +303,10 @@ Version 1 understands: `[Unit]` `Description`, `Documentation`, `After`,
 `[Service]` `Type` (`simple`, `exec`, `forking`, `oneshot`), `ExecStart`,
 `ExecStartPre`, `ExecStartPost`, `ExecStop`, `Restart`, `RestartSec`,
 `RestartSteps`, `RestartMaxDelaySec`, `TimeoutStartSec`, `TimeoutStopSec`,
-`TimeoutSec`, `WorkingDirectory`, `Environment`, `KillMode`; `[Install]`
+`TimeoutSec`, `WorkingDirectory`, `Environment`, `KillMode`; `[Timer]`
+`OnCalendar`, `OnActiveSec`, `OnBootSec`, `OnStartupSec`, `OnUnitActiveSec`,
+`OnUnitInactiveSec`, `Unit`, `Persistent`, `RandomizedDelaySec`,
+`FixedRandomDelay`, `RemainAfterElapse`, `AccuracySec`; `[Install]`
 `WantedBy`.
 
 **The defaults favour durability over systemd's.** A unit that says nothing
@@ -332,8 +334,9 @@ Built-in targets: `default.target` (sign-in), `graphical-session.target`
 (the shell is ready), and `tray.target`, home-manager's name for "the tray is
 there" (the tray takes icons, a moment after the shell is ready), so units
 shared with a Linux home that order after it or require it load unchanged.
-Requiring a built-in target waits for it to be reached. Once reached, a
-built-in target stays reached for the session.
+`timers.target`, where timers are installed, is another name for
+`default.target`. Requiring a built-in target waits for it to be reached.
+Once reached, a built-in target stays reached for the session.
 
 **Targets of the user's own** are `*.target` files: `[Unit]` and `[Install]`
 only, and nothing to run -- started, a target is active; stopped, it is not.
@@ -388,6 +391,81 @@ When Explorer restarts, `tray.target` stays reached and nothing is restarted.
 Tray programs hear the same broadcast and add their icons again; thide, a
 tray-icon program, came through a restart untouched.
 
+## Timers
+
+A `*.timer` file starts another unit when it elapses, as systemd's timers
+do, and is what a per-user Scheduled Task was for. It is `[Unit]`, `[Timer]`
+and `[Install]`, and runs nothing itself: `Unit=` names what it starts, by
+default the service named as the timer is. Timers are installed into
+`timers.target`.
+
+```ini
+# backup.timer, which starts backup.service
+[Unit]
+Description=Nightly backup
+
+[Timer]
+OnCalendar=*-*-* 03:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+The triggers are systemd's, and so are their rules (`timer.c`):
+
+- **`OnCalendar=`** takes systemd's calendar events (systemd.time(7)):
+  `daily`, `Mon..Fri 09:00`, `*-*-01 03:30`, `*:0/15`, `*-02~01`. The
+  events are in local time, or in UTC if they end in `UTC`. Other zones are
+  refused: systemd names them from the IANA database, which Windows' own time
+  zones are not. An event counts from the timer's last elapse, or from its
+  start if it has not elapsed yet.
+- **`OnActiveSec=`, `OnBootSec=`, `OnStartupSec=`** elapse once, counted
+  from the timer's start, from boot, and from sign-in (the session's logon
+  time, which is when steward starts). One that has already passed when the
+  timer starts is due at once, unless the timer has elapsed before.
+- **`OnUnitActiveSec=`, `OnUnitInactiveSec=`** count from the later of the
+  unit's last start (or stop) and the timer's last elapse. Until one of
+  those has happened they do not count at all, which is why they come with
+  another trigger (`OnBootSec=5min`, `OnUnitActiveSec=1h`).
+- **One run at a time.** Having elapsed, a timer waits for what it started
+  to be at rest again before it can elapse again, so it never starts a unit
+  that is still running from its last elapse.
+- **Starting through the plan.** What it starts is started like any unit,
+  its ordering included, and is ordered after the timer. Nothing else binds
+  the two: stopping the timer leaves a run it started running.
+- **The other keys.** `Persistent=`, `RandomizedDelaySec=`,
+  `FixedRandomDelay=` and `RemainAfterElapse=` are as in systemd.
+  `AccuracySec=` is accepted and has nothing to loosen (see below).
+  `WakeSystem=` is not supported: a timer elapses once the machine is awake.
+
+**Every time is the wall clock's.** systemd counts its relative timers on a
+monotonic clock, which stops while the machine sleeps. steward counts time
+asleep, as a Scheduled Task's repetition does: `OnUnitActiveSec=1h` means an
+hour on the clock since the unit last started, however much of it the
+machine slept. One clock also makes a schedule plain to record and to show.
+The manager works each timer's next elapse out afresh on every turn of its
+loop, which comes at least once a second, from what has happened: when the
+timer started, when it last elapsed, and when its unit last started and
+stopped. So an elapse missed asleep is due on waking, once however many
+were missed, and a clock set right or a new time zone counts at once. That
+is also why `AccuracySec=` has nothing to do: systemd uses it to put wake-ups
+together, and steward is never more than a second late.
+
+**A timer's schedule survives the manager.** An active timer's schedule is
+recorded in the state file with the services' processes, so a manager that
+takes over has the timer where the last one left it: a trigger already
+spent does not elapse again, and an elapse missed in between is made up
+once. `Persistent=` adds a stamp per timer,
+`%LOCALAPPDATA%\steward\timers\<unit>`, which is the user's rather than the
+session's. Starting the timer again reads the stamp, so a nightly job that
+fell on a night spent signed out runs at sign-in.
+
+A timer takes a changed definition at once, as a target does, and its next
+elapse follows it; `switch` does not restart it. `stewctl list-timers` shows
+each timer's next and last elapse and what it starts; `stewctl status` of a
+timer shows the same.
+
 ## Nix and winpkgs
 
 steward is its own flake. It exports the Windows binaries, cross-built
@@ -414,9 +492,10 @@ home-manager runs on systemd, and has nothing to enable.
   control 128: the old manager hands its services over, and the instance
   starts again from the same path, as the new manager, which adopts them.
 - **`windowsModules.home`** writes home-manager's own
-  `systemd.user.services` and `systemd.user.targets` as unit files in
-  `%APPDATA%\steward\units` -- all but the targets steward has built in,
-  among them the `tray.target` home-manager declares everywhere.
+  `systemd.user.services`, `systemd.user.targets` and `systemd.user.timers`
+  as unit files in `%APPDATA%\steward\units` -- all but the targets steward
+  has built in, among them the `tray.target` home-manager declares
+  everywhere.
   winpkgs evaluates home-manager's modules, so the option is there, and on
   Windows home-manager's systemd module is off, its units going nowhere.
   Units are free-form `Section.Key` attributes rendered as home-manager
@@ -466,7 +545,14 @@ build remaps them.
   with it. The first start showed the readiness question below in practice:
   the bars came up before komorebi listened, failed, and were restarted a
   second later.
-- **Later** -- timers, event triggers.
+- **M5** (done) -- timers: `*.timer` files, `OnCalendar=` and the relative
+  triggers, `Persistent=`, `stewctl list-timers`, and a home's
+  `systemd.user.timers`. Exercised against a `--console` manager: calendar,
+  one-shot and chained timers elapsing, a persistent timer making up a
+  night it missed, a sign-in timer due at once, a timer that stops once
+  spent, a manager killed and replaced (every schedule kept, a missed elapse
+  made up once), and timers edited and switched without a restart.
+- **Later** -- event triggers.
 
 ## Open questions
 

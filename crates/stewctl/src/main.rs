@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use steward_ipc::{Request, Response, UnitStatus};
+use steward_ipc::{Request, Response, TimerStatus, UnitStatus};
 use steward_unit::{LoadedUnit, Severity};
 
 /// Everything stewctl prints goes through this rather than std's `println!`,
@@ -61,6 +61,9 @@ enum Command {
     /// List the units, their state, and their main process (the default).
     #[command(visible_aliases = ["list", "ls"])]
     ListUnits,
+    /// List the timers: when each next elapses, when it last did, and what
+    /// it starts.
+    ListTimers,
     /// Show the manager, or units in detail with the end of their logs.
     Status { units: Vec<String> },
     /// Start units, and what they want or require.
@@ -111,14 +114,15 @@ enum Command {
         #[arg(short, long)]
         follow: bool,
     },
-    /// Check unit files: every *.service and *.target in the unit directory,
-    /// or the files given.
+    /// Check unit files: every *.service, *.target and *.timer in the unit
+    /// directory, or the files given.
     Verify { files: Vec<PathBuf> },
 }
 
 fn main() -> ExitCode {
     let result = match Cli::parse().command.unwrap_or(Command::ListUnits) {
         Command::ListUnits => list(),
+        Command::ListTimers => list_timers(),
         Command::Status { units } => status(names(units)),
         Command::Start { units, no_block } => start(names(units), no_block),
         Command::Stop { units } => simple(Request::Stop {
@@ -177,12 +181,26 @@ fn simple(request: Request) -> Outcome {
     Ok(ExitCode::SUCCESS)
 }
 
-fn ago(secs: u64) -> String {
+/// `45s`, `5min 3s`, `5h 3min`, `2d 4h`.
+fn span(secs: u64) -> String {
     match secs {
-        s if s < 60 => format!("{s}s ago"),
-        s if s < 3600 => format!("{}min {}s ago", s / 60, s % 60),
-        s if s < 86_400 => format!("{}h {}min ago", s / 3600, s % 3600 / 60),
-        s => format!("{}d {}h ago", s / 86_400, s % 86_400 / 3600),
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}min {}s", s / 60, s % 60),
+        s if s < 86_400 => format!("{}h {}min", s / 3600, s % 3600 / 60),
+        s => format!("{}d {}h", s / 86_400, s % 86_400 / 3600),
+    }
+}
+
+fn ago(secs: u64) -> String {
+    format!("{} ago", span(secs))
+}
+
+/// How long until a timer's next elapse: `in 5h 3min`, or `now` once due.
+fn left(secs: f64) -> String {
+    if secs < 1.0 {
+        "now".to_owned()
+    } else {
+        format!("in {}", span(secs as u64))
     }
 }
 
@@ -223,6 +241,52 @@ fn list() -> Outcome {
     }
     if response.units.iter().any(|u| u.changed) {
         println!("\n* changed on disk; restart it (or `stewctl switch`) to use the new definition");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn list_timers() -> Outcome {
+    let response = ask(Request::Status { units: Vec::new() })?;
+    let mut timers: Vec<(&UnitStatus, &TimerStatus)> = response
+        .units
+        .iter()
+        .filter_map(|u| Some((u, u.timer.as_ref()?)))
+        .collect();
+    if timers.is_empty() {
+        println!("no timers");
+        return Ok(ExitCode::SUCCESS);
+    }
+    // The soonest first; those with nothing due after them.
+    let soon = |t: &TimerStatus| t.next_in_secs.unwrap_or(f64::INFINITY);
+    timers.sort_by(|a, b| soon(a.1).total_cmp(&soon(b.1)));
+    let dash = || "-".to_owned();
+    let rows: Vec<[String; 6]> = timers
+        .iter()
+        .map(|(unit, timer)| {
+            [
+                timer.next.clone().unwrap_or_else(dash),
+                timer.next_in_secs.map(left).unwrap_or_else(dash),
+                timer.last.clone().unwrap_or_else(dash),
+                timer.last_secs_ago.map(ago).unwrap_or_else(dash),
+                unit.name.clone(),
+                timer.unit.clone(),
+            ]
+        })
+        .collect();
+    let header = ["NEXT", "LEFT", "LAST", "PASSED", "UNIT", "ACTIVATES"].map(str::to_owned);
+    let mut widths = [0; 6];
+    for row in std::iter::once(&header).chain(&rows) {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.chars().count());
+        }
+    }
+    for row in std::iter::once(&header).chain(&rows) {
+        let cells: Vec<String> = row
+            .iter()
+            .zip(widths)
+            .map(|(cell, width)| format!("{cell:<width$}"))
+            .collect();
+        println!("{}", cells.join("  ").trim_end());
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -306,7 +370,19 @@ fn print_unit(unit: &UnitStatus) {
         (Some(since), Some(secs)) => format!(" since {since} ({})", ago(secs)),
         _ => String::new(),
     };
-    println!("     Active: {}{since}", unit.state);
+    match unit.timer.as_ref().filter(|t| !t.state.is_empty()) {
+        Some(timer) => println!("     Active: {} ({}){since}", unit.state, timer.state),
+        None => println!("     Active: {}{since}", unit.state),
+    }
+    if let Some(timer) = &unit.timer {
+        if let (Some(next), Some(secs)) = (&timer.next, timer.next_in_secs) {
+            println!("    Trigger: {next} ({})", left(secs));
+        }
+        println!("   Triggers: {}", timer.unit);
+        if let (Some(last), Some(secs)) = (&timer.last, timer.last_secs_ago) {
+            println!("       Last: {last} ({})", ago(secs));
+        }
+    }
     if let Some(secs) = unit.restart_in_secs {
         println!("    Restart: in {secs:.1} s");
     }
@@ -318,6 +394,8 @@ fn print_unit(unit: &UnitStatus) {
         println!("  Processes: {}", pids.join(" "));
     }
     match &unit.last_outcome {
+        // A timer is never restarted; what it starts may be.
+        _ if unit.timer.is_some() => {}
         Some(outcome) => println!("   Restarts: {} (last ended: it {outcome})", unit.restarts),
         None => println!("   Restarts: {}", unit.restarts),
     }
@@ -678,6 +756,16 @@ mod tests {
     fn a_bare_name_is_a_service() {
         assert_eq!(name("whkd".into()), "whkd.service");
         assert_eq!(name("whkd.service".into()), "whkd.service");
+    }
+
+    #[test]
+    fn spans_of_time() {
+        assert_eq!(ago(59), "59s ago");
+        assert_eq!(ago(3 * 3600 + 120), "3h 2min ago");
+        assert_eq!(left(0.4), "now");
+        assert_eq!(left(-5.0), "now");
+        assert_eq!(left(90.0), "in 1min 30s");
+        assert_eq!(left(2.0 * 86_400.0), "in 2d 0h");
     }
 
     #[test]
