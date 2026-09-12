@@ -1,17 +1,22 @@
 //! Which units start when, and in what order, and what stops with what.
 //!
-//! Three targets are built in. `default.target` is reached as soon as the
-//! manager is up, at sign-in. `graphical-session.target` is reached once the
-//! shell is ready -- Explorer's taskbar exists -- which the manager finds out
-//! for itself; before that there are no windows to manage and no tray to sit
-//! in. `tray.target` is another name for it. A unit is started when a target
-//! it is `WantedBy=` is reached, along with everything it `Wants=` or
+//! Four targets are built in. `default.target` is reached as soon as the
+//! manager is up, at sign-in; `timers.target`, where timers are installed, is
+//! another name for it. `graphical-session.target` is reached once the shell
+//! is ready -- Explorer's taskbar exists -- which the manager finds out for
+//! itself; before that there are no windows to manage and no tray to sit in.
+//! `tray.target` is another name for it. A unit is started when a target it
+//! is `WantedBy=` is reached, along with everything it `Wants=` or
 //! `Requires=`.
 //!
 //! Any other target is a unit file of its own, a unit that runs nothing, and
 //! in the plan it is a unit like any other: `WantedBy=` it is its `Wants=`,
 //! so starting it starts what it wants, and ordering after it is ordering
 //! after a unit.
+//!
+//! A timer is a unit like any other too. What it starts when it elapses is
+//! ordered after it, as in systemd, and nothing else binds them: stopping
+//! the timer leaves a run it started running.
 //!
 //! Ordering is `After=`/`Before=`: a unit waits while anything it is ordered
 //! after is still waiting or on its way up (a unit waiting out a restart
@@ -31,22 +36,24 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use steward_unit::{Service, BUILTIN_TARGETS};
-pub use steward_unit::{DEFAULT_TARGET, GRAPHICAL_TARGET, TRAY_TARGET};
+pub use steward_unit::{DEFAULT_TARGET, GRAPHICAL_TARGET, TIMERS_TARGET, TRAY_TARGET};
 
 use crate::machine::State;
 
-/// Reached by the manager, not started: `default.target`,
-/// `graphical-session.target`, and `tray.target` (which is the latter).
+/// Reached by the manager, not started: `default.target` and
+/// `timers.target` (which is the former), `graphical-session.target` and
+/// `tray.target` (which is the latter).
 fn is_builtin(name: &str) -> bool {
     BUILTIN_TARGETS.contains(&name)
 }
 
-/// The name a unit's dependency means: `tray.target` is the shell's.
+/// The name a unit's dependency means: `tray.target` is the shell's,
+/// `timers.target` sign-in's.
 fn canonical(name: &str) -> String {
-    if name == TRAY_TARGET {
-        GRAPHICAL_TARGET.to_owned()
-    } else {
-        name.to_owned()
+    match name {
+        TRAY_TARGET => GRAPHICAL_TARGET.to_owned(),
+        TIMERS_TARGET => DEFAULT_TARGET.to_owned(),
+        _ => name.to_owned(),
     }
 }
 
@@ -149,6 +156,10 @@ impl Plan {
                     node.wants.insert(s.name.clone());
                 }
             }
+            // What a timer starts is ordered after it.
+            if let Some(node) = s.timer.as_ref().and_then(|t| nodes.get_mut(&t.unit)) {
+                node.after.insert(s.name.clone());
+            }
         }
 
         let mut warnings = Vec::new();
@@ -179,6 +190,12 @@ impl Plan {
                 if !exists(&whole) {
                     warnings.push(format!("{name}: part of {whole}, which does not exist"));
                 }
+            }
+            if let Some(timer) = s.timer.as_ref().filter(|t| !exists(&t.unit)) {
+                warnings.push(format!(
+                    "{name}: starts {}, which does not exist",
+                    timer.unit
+                ));
             }
         }
         (Plan { nodes }, warnings)
@@ -587,6 +604,10 @@ mod tests {
         // whkd comes with its group.
         assert!(graphical.contains("whkd.service"));
         assert_eq!(plan.bound_to("tiling.target"), set(&["whkd.service"]));
+        // The timer comes with sign-in; what it starts, only when it elapses.
+        let signed_in = plan.pulled_in_by(DEFAULT_TARGET);
+        assert!(signed_in.contains("hello.timer"));
+        assert!(!signed_in.contains("hello.service"));
     }
 
     fn target(name: &str, text: &str) -> Service {
@@ -679,6 +700,39 @@ mod tests {
         )];
         let (_, warnings) = Plan::new(&services);
         assert_eq!(warnings.len(), 2, "{warnings:?}");
+    }
+
+    #[test]
+    fn timers_come_with_sign_in_and_what_they_start_follows_them() {
+        let units = [
+            target(
+                "backup.timer",
+                "[Timer]\nOnCalendar=daily\n[Install]\nWantedBy=timers.target\n",
+            ),
+            unit("backup.service", "", ""),
+        ];
+        let (plan, warnings) = Plan::new(&units);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // timers.target is reached at sign-in; the service is started by
+        // the timer, not with it.
+        assert_eq!(plan.pulled_in_by(DEFAULT_TARGET), set(&["backup.timer"]));
+        let mut sim = Sim::new(&units);
+        let mut waiting = set(&["backup.timer", "backup.service"]);
+        sim.start(&mut waiting, &[]);
+        assert_eq!(sim.rounds, [vec!["backup.timer"], vec!["backup.service"]]);
+        // Nothing binds the two: stopping either leaves the other.
+        assert!(plan.bound_to("backup.timer").is_empty());
+        assert!(plan.bound_to("backup.service").is_empty());
+    }
+
+    #[test]
+    fn a_timer_that_starts_nothing_is_warned_about() {
+        let units = [target("backup.timer", "[Timer]\nOnCalendar=daily\n")];
+        let (_, warnings) = Plan::new(&units);
+        assert_eq!(
+            warnings,
+            ["backup.timer: starts backup.service, which does not exist"]
+        );
     }
 
     #[test]

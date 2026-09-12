@@ -3,9 +3,11 @@
 //!
 //! A `.service` runs something. A `.target` runs nothing: it is `[Unit]` and
 //! `[Install]` only, a name units can be `WantedBy=`, ordered `After=`, and
-//! `PartOf=`, so that starting or stopping it starts or stops them. Both are
-//! a [`Service`], told apart by its [`UnitKind`]. `default.target`,
-//! `graphical-session.target` and `tray.target` are steward's own.
+//! `PartOf=`, so that starting or stopping it starts or stops them. A
+//! `.timer` runs nothing itself either: its `[Timer]` section says when to
+//! start another unit. All three are a [`Service`], told apart by its
+//! [`UnitKind`]. `default.target`, `graphical-session.target`, `tray.target`
+//! and `timers.target` are steward's own.
 //!
 //! Assignment follows systemd: a scalar key takes its last value; a list key
 //! (`After=`, `Environment=`, `ExecStartPre=`, ...) accumulates, and an empty
@@ -34,8 +36,10 @@
 use std::fmt;
 use std::time::Duration;
 
+use crate::calendar::parse_calendar;
 use crate::syntax::{self, Entry, UnitFile};
 use crate::time::parse_timespan;
+use crate::timer::{Timer, Trigger};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -72,15 +76,21 @@ pub const GRAPHICAL_TARGET: &str = "graphical-session.target";
 /// home-manager's name for "the tray is there", which on Windows is when the
 /// taskbar is: another name for `graphical-session.target`.
 pub const TRAY_TARGET: &str = "tray.target";
+/// Where timers are installed. systemd reaches it early in a user manager's
+/// start; here it is another name for `default.target`.
+pub const TIMERS_TARGET: &str = "timers.target";
 /// The targets steward reaches itself; no unit file may be one of them.
-pub const BUILTIN_TARGETS: [&str; 3] = [DEFAULT_TARGET, GRAPHICAL_TARGET, TRAY_TARGET];
+pub const BUILTIN_TARGETS: [&str; 4] =
+    [DEFAULT_TARGET, GRAPHICAL_TARGET, TRAY_TARGET, TIMERS_TARGET];
 
-/// A service, or a target: a unit that runs nothing.
+/// A service; a target, a unit that runs nothing; or a timer, which starts
+/// another unit when it elapses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UnitKind {
     #[default]
     Service,
     Target,
+    Timer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -126,11 +136,11 @@ pub struct Command {
     pub ignore_failure: bool,
 }
 
-/// A unit: a service, or a target, which has the `[Unit]` and `[Install]`
-/// fields and nothing to run.
+/// A unit: a service; a target, which has the `[Unit]` and `[Install]`
+/// fields and nothing to run; or a timer, which has those and a [`Timer`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Service {
-    /// The unit's name, `whkd.service` or `tiling.target`.
+    /// The unit's name, `whkd.service`, `tiling.target` or `backup.timer`.
     pub name: String,
     pub kind: UnitKind,
     pub description: Option<String>,
@@ -163,12 +173,25 @@ pub struct Service {
     pub environment: Vec<(String, String)>,
     pub kill_mode: KillMode,
 
+    /// A timer's `[Timer]` section; `None` for anything else.
+    pub timer: Option<Timer>,
+
     pub wanted_by: Vec<String>,
 }
 
 impl Service {
     pub fn is_target(&self) -> bool {
         self.kind == UnitKind::Target
+    }
+
+    pub fn is_timer(&self) -> bool {
+        self.kind == UnitKind::Timer
+    }
+
+    /// A target or a timer: started, it is active; stopped, it is not; and
+    /// there is never a process of its own.
+    pub fn runs_nothing(&self) -> bool {
+        self.kind != UnitKind::Service
     }
 
     fn new(name: &str, kind: UnitKind) -> Self {
@@ -198,6 +221,7 @@ impl Service {
             working_directory: None,
             environment: Vec::new(),
             kill_mode: KillMode::ControlGroup,
+            timer: (kind == UnitKind::Timer).then(|| Timer::new(name)),
             wanted_by: Vec::new(),
         }
     }
@@ -218,12 +242,13 @@ impl Parsed {
     }
 }
 
-/// Read `text` as the unit called `name` -- its file name, `whkd.service` or
-/// `tiling.target`, which says which kind of unit it is.
+/// Read `text` as the unit called `name` -- its file name, `whkd.service`,
+/// `tiling.target` or `backup.timer`, which says which kind of unit it is.
 pub fn parse_service(name: &str, text: &str) -> Parsed {
     let mut reader = Reader {
         diagnostics: Vec::new(),
         bad_exec_start: false,
+        bad_trigger: false,
     };
     let service = match syntax::parse(text) {
         Ok(file) => reader.service(name, &file),
@@ -246,6 +271,8 @@ struct Reader {
     diagnostics: Vec<Diagnostic>,
     /// An ExecStart= line was already an error: don't also report the count.
     bad_exec_start: bool,
+    /// So was a timer's trigger: don't also report that it has none.
+    bad_trigger: bool,
 }
 
 impl Reader {
@@ -268,9 +295,14 @@ impl Reader {
     fn service(&mut self, name: &str, file: &UnitFile) -> Option<Service> {
         let kind = if name.ends_with(".target") {
             UnitKind::Target
+        } else if name.ends_with(".timer") {
+            UnitKind::Timer
         } else {
             if !name.ends_with(".service") {
-                self.error(0, format!("{name:?} is not a .service or .target unit"));
+                self.error(
+                    0,
+                    format!("{name:?} is not a .service, .target or .timer unit"),
+                );
             }
             UnitKind::Service
         };
@@ -291,10 +323,22 @@ impl Reader {
                     section.line,
                     "a target runs nothing; it has no [Service] section",
                 ),
+                "Service" if kind == UnitKind::Timer => self.error(
+                    section.line,
+                    "a timer runs nothing itself; it has no [Service] section (Unit= names what it starts)",
+                ),
                 "Service" => section
                     .entries
                     .iter()
                     .for_each(|e| self.service_key(&mut s, e)),
+                "Timer" if kind == UnitKind::Timer => {
+                    let mut timer = s.timer.take().expect("a timer has a [Timer]");
+                    section
+                        .entries
+                        .iter()
+                        .for_each(|e| self.timer_key(&mut timer, e));
+                    s.timer = Some(timer);
+                }
                 "Install" => section
                     .entries
                     .iter()
@@ -397,6 +441,76 @@ impl Reader {
         }
     }
 
+    fn timer_key(&mut self, t: &mut Timer, e: &Entry) {
+        let trigger: fn(Duration) -> Trigger = match e.key.as_str() {
+            // An empty assignment to any of them resets all of them, as in
+            // systemd.
+            "OnActiveSec" | "OnBootSec" | "OnStartupSec" | "OnUnitActiveSec"
+            | "OnUnitInactiveSec" | "OnCalendar"
+                if e.value.is_empty() =>
+            {
+                return t.triggers.clear();
+            }
+            "OnActiveSec" => Trigger::Active,
+            "OnBootSec" => Trigger::Boot,
+            "OnStartupSec" => Trigger::Startup,
+            "OnUnitActiveSec" => Trigger::UnitActive,
+            "OnUnitInactiveSec" => Trigger::UnitInactive,
+            "OnCalendar" => {
+                match parse_calendar(&e.value) {
+                    Ok(calendar) => t.triggers.push(Trigger::Calendar(Box::new(calendar))),
+                    Err(message) => {
+                        self.bad_trigger = true;
+                        self.error(e.line, format!("OnCalendar=: {message}"));
+                    }
+                }
+                return;
+            }
+            "Unit" => {
+                let unit = e.value.as_str();
+                if unit.ends_with(".timer") {
+                    self.error(
+                        e.line,
+                        "Unit= is a timer; a timer starts a service or a target",
+                    );
+                } else if BUILTIN_TARGETS.contains(&unit) {
+                    self.error(
+                        e.line,
+                        format!(
+                            "Unit={unit} is steward's own target, which is reached, not started"
+                        ),
+                    );
+                } else if unit.ends_with(".service") || unit.ends_with(".target") {
+                    t.unit = unit.to_owned();
+                } else {
+                    self.error(e.line, format!("Unit={unit} is not a .service or .target"));
+                }
+                return;
+            }
+            "Persistent" => return self.boolean(e, &mut t.persistent),
+            "AccuracySec" => return self.span(e, &mut t.accuracy),
+            "RandomizedDelaySec" => return self.span(e, &mut t.randomized_delay),
+            "FixedRandomDelay" => return self.boolean(e, &mut t.fixed_random_delay),
+            "RemainAfterElapse" => return self.boolean(e, &mut t.remain_after_elapse),
+            "WakeSystem" => {
+                let mut wake = false;
+                self.boolean(e, &mut wake);
+                if wake {
+                    self.warn(
+                        e.line,
+                        "WakeSystem= is not supported; the timer elapses once the machine is awake",
+                    );
+                }
+                return;
+            }
+            _ => return self.unknown(e, "Timer"),
+        };
+        match self.timespan(e) {
+            Some(span) => t.triggers.push(trigger(span)),
+            None => self.bad_trigger = true,
+        }
+    }
+
     fn install_key(&mut self, s: &mut Service, e: &Entry) {
         match e.key.as_str() {
             "WantedBy" => list(&mut s.wanted_by, &e.value),
@@ -414,7 +528,22 @@ impl Reader {
     }
 
     fn validate(&mut self, s: &Service) {
-        if s.is_target() {
+        if let Some(timer) = &s.timer {
+            if timer.triggers.is_empty() && !self.bad_trigger {
+                self.error(
+                    0,
+                    "no OnCalendar= or On...Sec= (a timer needs something to wait for)",
+                );
+            }
+            let calendar = |t: &Trigger| matches!(t, Trigger::Calendar(_));
+            if timer.persistent && !timer.triggers.iter().any(calendar) {
+                self.warn(
+                    0,
+                    "Persistent= applies to OnCalendar= only, and there is none",
+                );
+            }
+        }
+        if s.runs_nothing() {
             return;
         }
         match (s.exec_start.len(), s.service_type) {
@@ -511,6 +640,15 @@ impl Reader {
         parse_timespan(&e.value)
             .map_err(|message| self.error(e.line, format!("{}=: {message}", e.key)))
             .ok()
+    }
+
+    /// systemd's booleans: 1, yes, y, true, t, on, and their opposites.
+    fn boolean(&mut self, e: &Entry, into: &mut bool) {
+        match e.value.to_ascii_lowercase().as_str() {
+            "1" | "yes" | "y" | "true" | "t" | "on" => *into = true,
+            "0" | "no" | "n" | "false" | "f" | "off" => *into = false,
+            _ => self.error(e.line, format!("{}={} is not a boolean", e.key, e.value)),
+        }
     }
 
     fn number(&mut self, e: &Entry, into: &mut u32) {
@@ -786,8 +924,115 @@ WantedBy=graphical-session.target
     }
 
     #[test]
-    fn the_name_must_be_a_service_or_a_target() {
-        assert!(parse_service("t.timer", "[Service]\nExecStart=x\n").has_errors());
+    fn the_name_must_be_a_service_a_target_or_a_timer() {
+        assert_eq!(
+            parse_service("t.socket", "[Service]\nExecStart=x\n").diagnostics[0].to_string(),
+            "error: \"t.socket\" is not a .service, .target or .timer unit"
+        );
+    }
+
+    fn timer(text: &str) -> Timer {
+        let parsed = parse_service("backup.timer", text);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let unit = parsed.service.unwrap();
+        assert!(unit.is_timer() && unit.runs_nothing());
+        unit.timer.unwrap()
+    }
+
+    fn timer_messages(text: &str) -> Vec<String> {
+        parse_service("backup.timer", text)
+            .diagnostics
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn a_timer_starts_the_service_named_as_it_is_by_default() {
+        let t = timer("[Unit]\nDescription=Nightly\n[Timer]\nOnCalendar=daily\nPersistent=true\n[Install]\nWantedBy=timers.target\n");
+        assert_eq!(t.unit, "backup.service");
+        assert!(t.persistent);
+        assert!(t.remain_after_elapse);
+        assert_eq!(t.randomized_delay, Duration::ZERO);
+        assert!(matches!(&t.triggers[..], [Trigger::Calendar(c)] if c.to_string() == "daily"));
+        assert_eq!(
+            timer("[Timer]\nOnBootSec=1\nUnit=other.target\n").unit,
+            "other.target"
+        );
+    }
+
+    #[test]
+    fn a_timer_s_triggers_accumulate_and_an_empty_one_resets_them_all() {
+        let t = timer("[Timer]\nOnCalendar=hourly\nOnBootSec=5min\nOnUnitActiveSec=1h\nOnUnitInactiveSec=30s\nOnStartupSec=0\nOnActiveSec=1s\n");
+        assert_eq!(
+            t.triggers[1..],
+            [
+                Trigger::Boot(Duration::from_secs(300)),
+                Trigger::UnitActive(Duration::from_secs(3600)),
+                Trigger::UnitInactive(Duration::from_secs(30)),
+                Trigger::Startup(Duration::ZERO),
+                Trigger::Active(Duration::from_secs(1)),
+            ]
+        );
+        let t =
+            timer("[Timer]\nOnCalendar=hourly\nOnBootSec=5min\nOnActiveSec=\nOnUnitActiveSec=1h\n");
+        assert_eq!(t.triggers, [Trigger::UnitActive(Duration::from_secs(3600))]);
+    }
+
+    #[test]
+    fn timer_settings() {
+        let t = timer("[Timer]\nOnActiveSec=1\nRandomizedDelaySec=10min\nFixedRandomDelay=yes\nRemainAfterElapse=no\nAccuracySec=1s\nWakeSystem=false\n");
+        assert_eq!(t.randomized_delay, Duration::from_secs(600));
+        assert!(t.fixed_random_delay);
+        assert!(!t.remain_after_elapse);
+        assert_eq!(t.accuracy, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn what_a_timer_cannot_be() {
+        assert_eq!(
+            timer_messages("[Unit]\nDescription=x\n"),
+            ["error: no OnCalendar= or On...Sec= (a timer needs something to wait for)"]
+        );
+        assert_eq!(
+            timer_messages("[Timer]\nOnCalendar=daily\n[Service]\nExecStart=x\n"),
+            ["line 3: error: a timer runs nothing itself; it has no [Service] section (Unit= names what it starts)"]
+        );
+        assert_eq!(
+            timer_messages("[Timer]\nOnCalendar=sometimes\n"),
+            ["line 2: error: OnCalendar=: \"sometimes\" is not a day of the week"]
+        );
+        assert_eq!(
+            timer_messages("[Timer]\nOnBootSec=soon\n"),
+            ["line 2: error: OnBootSec=: \"soon\" is not a time span"]
+        );
+        assert_eq!(
+            timer_messages("[Timer]\nOnBootSec=1\nUnit=other.timer\n"),
+            ["line 3: error: Unit= is a timer; a timer starts a service or a target"]
+        );
+        assert_eq!(
+            timer_messages("[Timer]\nOnBootSec=1\nUnit=other.socket\n"),
+            ["line 3: error: Unit=other.socket is not a .service or .target"]
+        );
+        assert_eq!(
+            timer_messages("[Timer]\nOnBootSec=1\nPersistent=maybe\n"),
+            ["line 3: error: Persistent=maybe is not a boolean"]
+        );
+    }
+
+    #[test]
+    fn what_a_timer_warns_about() {
+        assert_eq!(
+            timer_messages("[Timer]\nOnBootSec=1\nPersistent=true\n"),
+            ["warning: Persistent= applies to OnCalendar= only, and there is none"]
+        );
+        assert_eq!(
+            timer_messages("[Timer]\nOnBootSec=1\nWakeSystem=true\nOnClockChange=yes\n"),
+            [
+                "line 3: warning: WakeSystem= is not supported; the timer elapses once the machine is awake",
+                "line 4: warning: OnClockChange= is not supported in [Timer]; ignored",
+            ]
+        );
     }
 
     #[test]

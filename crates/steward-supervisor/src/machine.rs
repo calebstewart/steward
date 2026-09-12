@@ -196,8 +196,9 @@ impl Machine {
     /// rest takes it at once; a running one keeps the definition it was
     /// started with -- its `ExecStop=` included -- until its next start.
     pub fn replace(&mut self, service: Service) {
-        // A target has nothing running that could still be the old one.
-        if service.is_target()
+        // A target or a timer has nothing running that could still be the
+        // old one.
+        if service.runs_nothing()
             || matches!(
                 self.state,
                 State::Inactive | State::Failed | State::AutoRestart
@@ -230,10 +231,11 @@ impl Machine {
 
     /// Take over a service that was already running when the manager started
     /// (the manager crashed or was upgraded and its job survived).
-    /// A target the last manager had reached is simply active again.
+    /// A target the last manager had reached, or a timer it had started, is
+    /// simply active again.
     pub fn adopt(&mut self, main_alive: bool, now: Instant) -> Vec<Action> {
         let mut out = Vec::new();
-        if self.service.is_target() {
+        if self.service.runs_nothing() {
             self.state = State::Active;
             self.active_since = Some(now);
             return out;
@@ -262,7 +264,8 @@ impl Machine {
         use State::*;
 
         // A target runs nothing: started, it is active; stopped, it is not.
-        if self.service.is_target() {
+        // Nor does a timer; when it elapses is its schedule's business.
+        if self.service.runs_nothing() {
             match event {
                 Start => {
                     self.state = Active;
@@ -1003,6 +1006,21 @@ mod tests {
         t.replace(changed);
         assert!(!t.is_changed());
         assert_eq!(t.service().description.as_deref(), Some("new"));
+        assert_eq!(t.state(), State::Active);
+    }
+
+    #[test]
+    fn a_timer_is_active_once_started_and_takes_a_new_definition_at_once() {
+        let unit = |text: &str| parse_service("backup.timer", text).service.unwrap();
+        let mut t = Machine::new(unit("[Timer]\nOnCalendar=daily\n"));
+        let now = Instant::now();
+        assert_eq!(t.handle(Start, now), []);
+        assert_eq!(t.state(), State::Active);
+        t.replace(unit("[Timer]\nOnCalendar=weekly\n"));
+        assert!(!t.is_changed());
+        assert_eq!(t.handle(Stop, now), []);
+        assert_eq!(t.state(), State::Inactive);
+        assert_eq!(t.adopt(false, now), []);
         assert_eq!(t.state(), State::Active);
     }
 

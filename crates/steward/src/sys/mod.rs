@@ -1,7 +1,9 @@
 //! The Windows half of supervision: jobs, processes, the completion port the
-//! manager waits on, environments, and asking programs to exit. Each module is
-//! a thin, safe wrapper over the Win32 calls it names.
+//! manager waits on, environments, asking programs to exit, and the local
+//! clock timers keep. Each module is a thin, safe wrapper over the Win32 calls
+//! it names.
 
+pub mod clock;
 pub mod env;
 pub mod job;
 pub mod port;

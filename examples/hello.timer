@@ -1,0 +1,14 @@
+# A timer: every minute, on the minute, it starts hello.service, the service
+# named as it is (Unit= would name another). `stewctl list-timers` shows when
+# it next elapses and when it last did; `stewctl logs -f hello` shows each
+# run's line. A nightly job would say `OnCalendar=*-*-* 03:00` and
+# `Persistent=true`, so that a night spent signed out is made up at sign-in.
+
+[Unit]
+Description=Says hello every minute
+
+[Timer]
+OnCalendar=minutely
+
+[Install]
+WantedBy=timers.target
