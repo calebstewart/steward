@@ -248,10 +248,13 @@ The verbs follow `systemctl`: `list-units` (the default), `status [unit...]`,
 `--no-block`), `is-active`, `daemon-reload`, and `logs [-f] [-n N]`, which
 reads the log file itself. `whkd` means `whkd.service`. Two differ:
 
-- **`switch`** reads the unit files and makes what runs match them: removed
-  units stop, changed running units restart with their new definition, and
-  wanted units that are not running start. It is what an apply runs, the way
-  home-manager runs `sd-switch`. `daemon-reload` alone only takes note: a
+- **`switch`** reads the unit files and makes what runs match them, as
+  home-manager's `sd-switch` does: removed units stop, changed running units
+  restart with their new definition, and of the units at rest, what is new
+  starts -- a new unit, one a target newly wants, or a failed one whose
+  definition changed. A unit stopped on purpose stays stopped, since `switch`
+  runs after every apply that changes a unit, and an apply is no reason to
+  undo a stop. `daemon-reload` alone only takes note: a
   changed unit keeps running as it was started (its `ExecStop=` included)
   until it is restarted, and is marked changed until then.
 - **No `enable`/`disable`.** A unit is enabled by its `[Install] WantedBy=`;

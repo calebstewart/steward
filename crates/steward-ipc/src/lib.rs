@@ -34,8 +34,9 @@ pub enum Request {
     },
     /// Read the unit files again. A removed unit is stopped; a changed one
     /// keeps running with its old definition until it is restarted. With
-    /// `apply`, the running set is made to match the files: changed units are
-    /// restarted and wanted ones that are not running are started.
+    /// `apply`, the running set is made to match the files: changed units
+    /// that run are restarted, and new units, newly wanted ones and failed
+    /// ones that changed are started. A unit stopped on purpose stays stopped.
     Reload {
         apply: bool,
     },

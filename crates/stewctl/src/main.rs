@@ -61,8 +61,9 @@ enum Command {
     /// keep running as they are until restarted.
     #[command(visible_alias = "reload")]
     DaemonReload,
-    /// Read the unit files again and make what runs match them: restart the
-    /// changed, start the wanted, stop the removed. What an apply runs.
+    /// Read the unit files again and make what runs match them, as sd-switch
+    /// does: restart the changed, start the new, stop the removed; a unit
+    /// stopped on purpose stays stopped. What an apply runs.
     Switch,
     /// Show a unit's log: its output and steward's lines about it.
     Logs {

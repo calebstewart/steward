@@ -323,12 +323,26 @@ impl Manager {
         vec![format!("{name}: restarting")]
     }
 
-    /// Read the unit files again; with `apply`, make what runs match them.
+    /// What the reached targets pull in.
+    fn wanted(&self) -> BTreeSet<String> {
+        let mut wanted = self.plan.pulled_in_by(DEFAULT_TARGET);
+        if self.graphical {
+            wanted.extend(self.plan.pulled_in_by(GRAPHICAL_TARGET));
+        }
+        wanted
+    }
+
+    /// Read the unit files again; with `apply`, make what runs match them, as
+    /// sd-switch does for home-manager: the changed that run restart, the
+    /// removed stop, and of those at rest only what is new starts -- a new
+    /// unit, one a target newly wants, or a failed one whose definition
+    /// changed. A unit stopped on purpose stays stopped.
     fn reload(&mut self, apply: bool) -> Response {
         let (services, mut messages) = match read_units() {
             Ok(read) => read,
             Err(e) => return Response::error(e),
         };
+        let wanted_before = self.wanted();
         let mut fresh: std::collections::BTreeMap<String, Service> =
             services.into_iter().map(|s| (s.name.clone(), s)).collect();
 
@@ -350,6 +364,7 @@ impl Manager {
         }
 
         let mut changed = Vec::new();
+        let mut added = Vec::new();
         for (name, service) in std::mem::take(&mut fresh) {
             match self.slot(&name) {
                 Some(slot) => {
@@ -358,12 +373,16 @@ impl Manager {
                     if came_back || *unit.machine.next_service() != service {
                         unit.machine.replace(service);
                         messages.push(format!("{name}: changed"));
+                        if came_back {
+                            added.push(name.clone());
+                        }
                         changed.push(name);
                     }
                 }
                 None => {
                     messages.push(format!("{name}: new"));
                     self.units.push(Unit::new(service));
+                    added.push(name.clone());
                     changed.push(name);
                 }
             }
@@ -386,18 +405,17 @@ impl Manager {
                     messages.extend(self.restart(slot));
                 }
             }
-            let mut wanted = self.plan.pulled_in_by(DEFAULT_TARGET);
-            if self.graphical {
-                wanted.extend(self.plan.pulled_in_by(GRAPHICAL_TARGET));
-            }
-            for name in wanted {
+            for name in self.wanted() {
                 let Some(slot) = self.slot(&name) else {
                     continue;
                 };
-                let state = self.units[slot].machine.state();
-                // A failed unit is tried again once its definition changes.
-                let retry = state == State::Failed && changed.contains(&name);
-                if state == State::Inactive || retry {
+                let start = match self.units[slot].machine.state() {
+                    State::Inactive => added.contains(&name) || !wanted_before.contains(&name),
+                    // Tried again once its definition changes.
+                    State::Failed => changed.contains(&name),
+                    _ => false,
+                };
+                if start {
                     self.to_start.insert(name.clone());
                     messages.push(format!("{name}: starting"));
                 }
