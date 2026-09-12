@@ -33,6 +33,10 @@ about restarting is restarted when it fails, with a backoff from a second to a
 minute. `graphical-session.target` is reached once Explorer's taskbar exists.
 `stewctl verify` checks unit files without a manager.
 
+[`examples/`](examples) has units to try, each saying what it shows: a console
+program stopped with Ctrl+C, a crash loop and its backoff, ordering after
+another unit and the shell, and whkd as a real daemon.
+
 ## Using it
 
 ```

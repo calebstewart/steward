@@ -506,6 +506,21 @@ mod tests {
     }
 
     #[test]
+    fn the_examples_depend_on_nothing_missing() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        let services: Vec<Service> = steward_unit::load_dir(&dir)
+            .unwrap()
+            .into_iter()
+            .filter_map(|u| u.parsed.service)
+            .collect();
+        let (plan, warnings) = Plan::new(&services);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(plan
+            .pulled_in_by(GRAPHICAL_TARGET)
+            .contains("after-ping.service"));
+    }
+
+    #[test]
     fn stopping_runs_the_order_backwards() {
         let services = [
             unit("komorebi.service", "", ""),

@@ -1,0 +1,15 @@
+# Ordering and the shell. It waits for Explorer's taskbar
+# (graphical-session.target) and for ping.service to be up before it starts;
+# when everything is stopped, it stops before ping does. `After=` only orders:
+# stopping ping on its own leaves this running, which `Requires=ping.service`
+# would change.
+
+[Unit]
+Description=Starts after ping, once the shell is ready
+After=graphical-session.target ping.service
+
+[Service]
+ExecStart=ping -t 127.0.0.2
+
+[Install]
+WantedBy=graphical-session.target

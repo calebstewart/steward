@@ -11,6 +11,8 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ../crates
+      # The tests check that the example units still load.
+      ../examples
     ];
   };
   cargoLock.lockFile = ../Cargo.lock;

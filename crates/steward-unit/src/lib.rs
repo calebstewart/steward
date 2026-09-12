@@ -62,3 +62,23 @@ pub fn load_file(path: PathBuf) -> LoadedUnit {
     };
     LoadedUnit { path, parsed }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_examples_load_cleanly() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        let units = load_dir(&dir).unwrap();
+        assert!(units.len() >= 4, "found {} examples", units.len());
+        for unit in units {
+            assert!(
+                unit.parsed.diagnostics.is_empty(),
+                "{}: {:?}",
+                unit.path.display(),
+                unit.parsed.diagnostics
+            );
+        }
+    }
+}

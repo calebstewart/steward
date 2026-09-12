@@ -1,0 +1,12 @@
+# A console program that runs until it is asked to stop. `stewctl stop ping`
+# sends it Ctrl+C, which ping answers by printing its statistics and exiting;
+# `stewctl logs -f ping` shows its replies as they come.
+
+[Unit]
+Description=A console program that stops on Ctrl+C
+
+[Service]
+ExecStart=ping -t 127.0.0.1
+
+[Install]
+WantedBy=default.target
