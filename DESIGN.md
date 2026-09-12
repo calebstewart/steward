@@ -389,12 +389,14 @@ build remaps them.
   `switch`, `logs -f`. Exercised against a `--console` manager: queries,
   stop/start/restart, a second manager refused, a unit edited, one added and
   one removed while running, and `daemon-reload` then `switch`.
-- **M3** -- winpkgs integration: the service resource in winpkgs (done, with
-  `restartControl`; exercised on the machine: template registered, an
-  instance at sign-in, a handover under the same PIDs, stop-all at
-  sign-out), the two modules (written; their evaluation and closures are
-  flake checks), replacing a running binary in winpkgs (done), and running
-  `stewctl switch` after an apply (winpkgs' activations).
+- **M3** (done) -- winpkgs integration: the service resource with
+  `restartControl`, replacing a running binary, activations, and the two
+  modules. Exercised on the machine: the template registered, an instance at
+  sign-in, a handover under the same PIDs, stop-all at sign-out; then from
+  stewos, a system apply that replaced the running `steward.exe` in place
+  (moved aside, the trash emptied once the old manager had handed over) and
+  restarted the instance onto it, and a home apply that wrote a unit and ran
+  `stewctl switch`.
 - **M4** -- move whkd, komorebi, masir, Flow Launcher and thide off Run keys.
 - **Later** -- timers, event triggers.
 
