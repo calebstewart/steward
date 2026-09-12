@@ -1,9 +1,11 @@
 //! stewctl: the command line for steward, after `systemctl --user`.
 //!
 //! Everything but `verify` and `logs` asks the running manager, over its
-//! pipe. `logs` reads the unit's log file directly, so it works with the
-//! manager down; `verify` needs no manager at all.
+//! pipe. `logs` asks it where the logs are and which units exist, then reads
+//! the file itself -- falling back to this shell's LOCALAPPDATA when no
+//! manager runs; `verify` needs no manager at all.
 
+use std::collections::BTreeSet;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -215,14 +217,18 @@ fn status(units: Vec<String>) -> Outcome {
         println!("    Logs: {}", manager.log_dir);
         return Ok(ExitCode::SUCCESS);
     }
+    // The manager's log directory, not this shell's idea of one.
+    let log_dir = response.manager.as_ref().map(|m| PathBuf::from(&m.log_dir));
     for (i, unit) in response.units.iter().enumerate() {
         if i > 0 {
             println!();
         }
         print_unit(unit);
         println!();
-        for line in tail(&log_path(&unit.name)?, 10) {
-            println!("{line}");
+        if let Some(dir) = &log_dir {
+            for line in tail(&dir.join(format!("{}.log", unit.name)), 10) {
+                println!("{line}");
+            }
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -354,12 +360,102 @@ fn is_active(units: Vec<String>) -> Outcome {
 
 // ---- logs ------------------------------------------------------------------
 
-fn log_path(unit: &str) -> Result<PathBuf, String> {
-    let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
-    Ok(PathBuf::from(local)
-        .join("steward")
-        .join("logs")
-        .join(format!("{unit}.log")))
+/// Where the logs are and which units there are.
+struct LogView {
+    dir: PathBuf,
+    units: BTreeSet<String>,
+    from_manager: bool,
+}
+
+/// The running manager's view if there is one -- its log directory is the one
+/// that counts, whatever this shell's LOCALAPPDATA says -- otherwise this
+/// shell's: the logs under its LOCALAPPDATA and the units under its APPDATA.
+fn log_view() -> Result<LogView, String> {
+    if let Some(response) = manager_status()? {
+        let manager = response.manager.ok_or("steward sent no status")?;
+        return Ok(LogView {
+            dir: PathBuf::from(manager.log_dir),
+            units: response.units.into_iter().map(|u| u.name).collect(),
+            from_manager: true,
+        });
+    }
+    let local = std::env::var_os("LOCALAPPDATA")
+        .ok_or("steward is not running and LOCALAPPDATA is not set")?;
+    let dir = PathBuf::from(local).join("steward").join("logs");
+    let mut units = BTreeSet::new();
+    let names = |d: &std::path::Path, suffix: &str| -> Vec<String> {
+        std::fs::read_dir(d)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter_map(|n| n.strip_suffix(suffix).map(str::to_owned))
+            .collect()
+    };
+    units.extend(names(&dir, ".log"));
+    if let Some(unit_dir) = steward_unit::user_unit_dir() {
+        units.extend(
+            names(&unit_dir, ".service")
+                .into_iter()
+                .map(|n| n + ".service"),
+        );
+    }
+    Ok(LogView {
+        dir,
+        units,
+        from_manager: false,
+    })
+}
+
+/// The status of every unit, or `None` if no manager is running.
+#[cfg(windows)]
+fn manager_status() -> Result<Option<Response>, String> {
+    use steward_ipc::pipe::{request, ClientError};
+    match request(&Request::Status { units: Vec::new() }) {
+        Ok(Response {
+            error: Some(error), ..
+        }) => Err(error),
+        Ok(response) => Ok(Some(response)),
+        Err(ClientError::NotRunning) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[cfg(not(windows))]
+fn manager_status() -> Result<Option<Response>, String> {
+    Ok(None)
+}
+
+/// Edit distance, for suggesting the unit someone meant.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut previous = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let substitute = previous + usize::from(ca != *cb);
+            previous = row[j + 1];
+            row[j + 1] = substitute.min(row[j] + 1).min(previous + 1);
+        }
+    }
+    row[b.len()]
+}
+
+/// The candidate `wanted` is probably a misspelling or a shortening of.
+fn closest<'a>(wanted: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let stem = |s: &str| s.strip_suffix(".service").unwrap_or(s).to_lowercase();
+    let wanted = stem(wanted);
+    candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            let other = stem(candidate);
+            let d = distance(&wanted, &other);
+            let near = d <= 2.max(other.len() / 3);
+            let part = !wanted.is_empty() && (other.contains(&wanted) || wanted.contains(&other));
+            (near || part).then_some((d, candidate))
+        })
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, candidate)| candidate)
 }
 
 /// The last `n` lines of a file, if it can be read.
@@ -376,9 +472,36 @@ fn tail(path: &PathBuf, n: usize) -> Vec<String> {
 }
 
 fn logs(unit: &str, lines: usize, follow: bool) -> Outcome {
-    let path = log_path(unit)?;
-    if !path.exists() && !follow {
-        return Err(format!("no log for {unit} yet ({})", path.display()));
+    let view = log_view()?;
+    if !view.units.contains(unit) {
+        let mut message = format!("no unit named {unit}");
+        match closest(unit, view.units.iter().map(String::as_str)) {
+            Some(near) => {
+                message += &format!("; did you mean {}?", near.trim_end_matches(".service"))
+            }
+            None if !view.from_manager => {
+                message += &format!(
+                    " (steward is not running; looked in {})",
+                    view.dir.display()
+                )
+            }
+            None => {}
+        }
+        return Err(message);
+    }
+    let path = view.dir.join(format!("{unit}.log"));
+    // On stderr, so that the output itself can be piped clean.
+    let note = if view.from_manager {
+        ""
+    } else {
+        " (steward is not running)"
+    };
+    eprintln!("-- {}{note}", path.display());
+    if !path.exists() {
+        if !follow {
+            return Err(format!("{unit} has no log yet"));
+        }
+        eprintln!("-- no log yet; waiting for one");
     }
     for line in tail(&path, lines) {
         println!("{line}");
@@ -465,5 +588,29 @@ fn verify(files: Vec<PathBuf>) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_name_is_a_service() {
+        assert_eq!(name("whkd".into()), "whkd.service");
+        assert_eq!(name("whkd.service".into()), "whkd.service");
+    }
+
+    #[test]
+    fn suggestions() {
+        let units = ["pinger.service", "whkd.service", "komorebi.service"];
+        assert_eq!(closest("ping.service", units), Some("pinger.service"));
+        assert_eq!(
+            closest("komorebbi.service", units),
+            Some("komorebi.service")
+        );
+        assert_eq!(closest("WHKD.service", units), Some("whkd.service"));
+        assert_eq!(closest("flow-launcher.service", units), None);
+        assert_eq!(distance("kitten", "sitting"), 3);
     }
 }
