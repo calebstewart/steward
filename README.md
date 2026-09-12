@@ -9,13 +9,13 @@ and tells you what they are doing.
 
 See [DESIGN.md](DESIGN.md) for the design, what has been established on a real
 machine, and the roadmap. Supervision (M1) and the control plane (M2) are
-done, and so are integration with winpkgs (M3) and the desktop's daemons
-running under it (M4).
+done, and so are integration with winpkgs (M3), the desktop's daemons
+running under it (M4), and timers (M5).
 
 ## Units
 
 Units are systemd's syntax, in `%APPDATA%\steward\units\*.service` (and
-`*.target`, below):
+`*.target` and `*.timer`, below):
 
 ```ini
 [Unit]
@@ -54,14 +54,36 @@ whkd's and masir's units, `stewctl stop tiling.target` puts all three away and
 `stewctl start tiling.target` brings them back. As in systemd, stopping a
 unit also stops what `Requires=` it; what only `Wants=` it keeps running.
 
+A `*.timer` file starts a unit when it elapses -- by default the service
+named as it is -- in place of a Scheduled Task:
+
+```ini
+# backup.timer, which starts backup.service
+[Timer]
+OnCalendar=*-*-* 03:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+`OnCalendar=` takes systemd's calendar events (`daily`, `Mon..Fri 09:00`,
+`*:0/15`), in local time or UTC; `OnBootSec=`, `OnStartupSec=` (from
+sign-in), `OnActiveSec=`, `OnUnitActiveSec=` and `OnUnitInactiveSec=` count
+from what they say, on the wall clock, time asleep included. `Persistent=`
+makes up a run missed while you were signed out. `stewctl list-timers` shows
+when each timer next elapses.
+
 [`examples/`](examples) has units to try, each saying what it shows: a console
 program stopped with Ctrl+C, a crash loop and its backoff, ordering after
-another unit and the shell, and whkd as a real daemon in a tiling target.
+another unit and the shell, whkd as a real daemon in a tiling target, and a
+timer.
 
 ## Using it
 
 ```
 stewctl                    # list the units
+stewctl list-timers        # the timers: when each next elapses, and last did
 stewctl status whkd        # one unit in detail, with the end of its log
 stewctl start|stop|restart whkd
 stewctl logs -f whkd       # its output, and steward's lines about it

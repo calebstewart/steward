@@ -9,19 +9,27 @@
 //! console), or detaches, leaving its services running and their jobs
 //! recorded for the next manager to adopt (handing over to a new manager, as
 //! an upgrade does).
+//!
+//! A timer is looked at on every turn of the loop, which comes at least once
+//! a second: when one is due, what it starts is started, through the plan
+//! like any start. Its schedule is worked out afresh each time, from the
+//! wall clock, so time asleep, a clock set right and a new time zone all
+//! count at once.
 
 use std::collections::{BTreeSet, VecDeque};
+use std::hash::{BuildHasher, Hasher};
 use std::io::Write;
 use std::os::windows::io::OwnedHandle;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use steward_ipc::{ManagerStatus, Request, Response, UnitStatus};
-use steward_supervisor::plan::{DEFAULT_TARGET, GRAPHICAL_TARGET, TRAY_TARGET};
+use steward_ipc::{ManagerStatus, Request, Response, TimerStatus, UnitStatus};
+use steward_supervisor::plan::{DEFAULT_TARGET, GRAPHICAL_TARGET, TIMERS_TARGET, TRAY_TARGET};
 use steward_supervisor::{
-    Action, Decision, Event as UnitEvent, Machine, Outcome, Plan, Process, Progress, State,
+    Action, Decision, Event as UnitEvent, Machine, Moments, Outcome, Plan, Process, Progress,
+    Schedule, State,
 };
 use steward_unit::{Command, KillMode, Service};
 use windows_sys::core::BOOL;
@@ -33,7 +41,8 @@ use windows_sys::Win32::System::SystemServices::{
 
 use crate::control;
 use crate::log::{error, info, warning};
-use crate::state::{self, Saved, SavedProcess, SavedUnit};
+use crate::state::{self, from_millis, to_millis, Saved, SavedProcess, SavedTimer, SavedUnit};
+use crate::sys::clock::{self, Local};
 use crate::sys::job::Job;
 use crate::sys::port::{Packet, Port, Waker};
 use crate::sys::process::{self, Child, ExitWatch};
@@ -94,6 +103,12 @@ struct Unit {
     job_empty_fed: bool,
     main: Option<Tracked>,
     control: Option<Tracked>,
+    /// A timer's schedule; never started for anything else.
+    schedule: Schedule,
+    /// When it last left rest, and last came to rest: what a timer that
+    /// starts it counts `OnUnitActiveSec=` and `OnUnitInactiveSec=` from.
+    started_at: Option<SystemTime>,
+    stopped_at: Option<SystemTime>,
 }
 
 impl Unit {
@@ -108,6 +123,9 @@ impl Unit {
             job_empty_fed: true,
             main: None,
             control: None,
+            schedule: Schedule::default(),
+            started_at: None,
+            stopped_at: None,
         }
     }
 
@@ -139,6 +157,12 @@ struct Manager {
     /// The session this manager belongs to, and its services with it.
     session: u32,
     stdin: Option<OwnedHandle>,
+    /// When Windows started, and when the session did: what `OnBootSec=`
+    /// and `OnStartupSec=` count from.
+    boot: SystemTime,
+    startup: SystemTime,
+    /// The earliest a timer is next due, as last worked out.
+    next_elapse: Option<SystemTime>,
 }
 
 /// Run the manager until it is told to stop or detach. `controls` is the
@@ -171,6 +195,10 @@ pub fn run(port: Port, controls: Sender<Control>, inbox: Receiver<Control>) {
         stdin: process::open_null()
             .map_err(|e| error!("cannot open NUL for services' stdin: {e}"))
             .ok(),
+        boot: clock::boot_time(),
+        // Sign-in; failing that, now, which is as near as the manager knows.
+        startup: clock::logon_time(session).unwrap_or_else(SystemTime::now),
+        next_elapse: None,
     };
     manager.load_units();
     manager.adopt();
@@ -448,9 +476,10 @@ impl Manager {
                 };
                 // A target took its new definition at once, and restarting
                 // it would restart what is part of it: an edited description
-                // is no reason to bounce a whole group.
+                // is no reason to bounce a whole group. A timer took its new
+                // definition at once too, and its next elapse follows it.
                 let unit = &self.units[slot];
-                if !unit.resting() && !unit.machine.service().is_target() {
+                if !unit.resting() && !unit.machine.service().runs_nothing() {
                     messages.extend(self.restart(slot));
                 }
             }
@@ -526,7 +555,36 @@ impl Manager {
                 .map(|d| d.saturating_duration_since(now).as_secs_f64()),
             wanted_by: service.wanted_by.clone(),
             changed: unit.machine.is_changed(),
+            timer: self.timer_status(slot),
         }
+    }
+
+    fn timer_status(&self, slot: usize) -> Option<TimerStatus> {
+        let unit = &self.units[slot];
+        let timer = unit.machine.service().timer.as_ref()?;
+        let zone = Local::current();
+        let now = SystemTime::now();
+        let next = self.next_elapse_of(slot, now, &zone);
+        let schedule = &unit.schedule;
+        let state = match unit.machine.state() {
+            State::Active if schedule.running => "running",
+            State::Active if next.is_some() => "waiting",
+            State::Active => "elapsed",
+            _ => "",
+        };
+        Some(TimerStatus {
+            unit: timer.unit.clone(),
+            state: state.to_owned(),
+            next: next.map(|t| clock::format(t, &zone)),
+            next_in_secs: next.map(|t| match t.duration_since(now) {
+                Ok(left) => left.as_secs_f64(),
+                Err(overdue) => -overdue.duration().as_secs_f64(),
+            }),
+            last: schedule.last_trigger.map(|t| clock::format(t, &zone)),
+            last_secs_ago: schedule
+                .last_trigger
+                .map(|t| now.duration_since(t).map_or(0, |d| d.as_secs())),
+        })
     }
 
     // ---- adoption -------------------------------------------------------
@@ -607,6 +665,31 @@ impl Manager {
             self.units[slot].machine.adopt(false, Instant::now());
             info!("{name}: active, as it was");
         }
+        for (name, record) in saved.timers {
+            let Some(slot) = self.slot(&name) else {
+                continue;
+            };
+            let Some(timer) = self.units[slot].machine.service().timer.clone() else {
+                continue;
+            };
+            // What the unit it starts last did, which this manager did not see.
+            if let Some(started) = self.slot(&timer.unit) {
+                let target = &mut self.units[started];
+                target.started_at = target.started_at.or(record.unit_started.map(from_millis));
+                target.stopped_at = target.stopped_at.or(record.unit_stopped.map(from_millis));
+            }
+            let unit = &mut self.units[slot];
+            unit.machine.adopt(false, Instant::now());
+            unit.schedule.adopt(
+                &timer,
+                &name,
+                from_millis(record.activated),
+                record.last_trigger.map(from_millis),
+                record.running,
+                random(),
+            );
+            info!("{name}: active, as it was");
+        }
         self.dirty = true;
     }
 
@@ -640,6 +723,7 @@ impl Manager {
             self.deadlines();
             self.poll_jobs();
             self.check_shell();
+            self.timers();
         }
         self.dirty = true;
         self.save_if_dirty();
@@ -659,6 +743,10 @@ impl Manager {
             if let Some(deadline) = unit.machine.deadline() {
                 timeout = timeout.min(deadline.saturating_duration_since(now));
             }
+        }
+        if let Some(next) = self.next_elapse {
+            let left = next.duration_since(SystemTime::now()).unwrap_or_default();
+            timeout = timeout.min(left);
         }
         timeout
     }
@@ -701,7 +789,7 @@ impl Manager {
 
     fn reached(&self, target: &str) -> bool {
         match target {
-            DEFAULT_TARGET => true,
+            DEFAULT_TARGET | TIMERS_TARGET => true,
             GRAPHICAL_TARGET | TRAY_TARGET => self.graphical,
             _ => false,
         }
@@ -774,6 +862,106 @@ impl Manager {
             }
             self.feed(slot, UnitEvent::Deadline);
         }
+    }
+
+    // ---- timers ---------------------------------------------------------
+
+    /// What a timer's relative triggers count from, the unit it starts
+    /// included.
+    fn moments(&self, slot: usize) -> Moments {
+        let started = self.units[slot]
+            .machine
+            .service()
+            .timer
+            .as_ref()
+            .and_then(|t| self.slot(&t.unit))
+            .map(|s| &self.units[s]);
+        Moments {
+            boot: self.boot,
+            startup: self.startup,
+            unit_started: started.and_then(|u| u.started_at),
+            unit_stopped: started.and_then(|u| u.stopped_at),
+        }
+    }
+
+    /// When a timer is next due, if it is running and anything is.
+    fn next_elapse_of(&self, slot: usize, now: SystemTime, zone: &Local) -> Option<SystemTime> {
+        let unit = &self.units[slot];
+        let timer = unit.machine.service().timer.as_ref()?;
+        unit.schedule.next(timer, &self.moments(slot), now, zone)
+    }
+
+    /// Start what the timers that are due start. A timer that has elapsed
+    /// may elapse again once what it started is at rest; one with nothing
+    /// more to wait for and `RemainAfterElapse=no` stops.
+    fn timers(&mut self) {
+        self.next_elapse = None;
+        // Nothing starts while everything is being stopped.
+        if self.exit.is_some() {
+            return;
+        }
+        let zone = Local::current();
+        let now = SystemTime::now();
+        for slot in 0..self.units.len() {
+            let unit = &self.units[slot];
+            let Some(timer) = unit.machine.service().timer.clone() else {
+                continue;
+            };
+            if unit.machine.state() != State::Active {
+                continue;
+            }
+            if unit.schedule.running {
+                let at_rest = self.slot(&timer.unit).is_none_or(|s| {
+                    matches!(
+                        self.units[s].machine.state(),
+                        State::Inactive | State::Failed
+                    ) && !self.to_start.contains(&timer.unit)
+                });
+                if at_rest {
+                    self.units[slot].schedule.unit_at_rest();
+                }
+            }
+            let next = self.next_elapse_of(slot, now, &zone);
+            match next {
+                Some(due) if due <= now => self.elapse(slot, now),
+                Some(due) => {
+                    self.next_elapse = Some(self.next_elapse.map_or(due, |n| n.min(due)));
+                }
+                None if self.units[slot].schedule.is_done(&timer, None) => {
+                    self.mark(slot, "nothing more is due");
+                    self.feed(slot, UnitEvent::Stop);
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// A timer is due: start what it starts.
+    fn elapse(&mut self, slot: usize, now: SystemTime) {
+        let name = self.units[slot].name.clone();
+        let Some(timer) = self.units[slot].machine.service().timer.clone() else {
+            return;
+        };
+        self.units[slot].schedule.fire(&timer, &name, now, random());
+        self.dirty = true;
+        if timer.persistent {
+            if let Some(dir) = &self.state_dir {
+                if let Err(e) = state::write_stamp(dir, &name, now) {
+                    warning!("{name}: cannot record when it elapsed: {e}");
+                }
+            }
+        }
+        let started = &timer.unit;
+        let line = match self.slot(started).filter(|&s| !self.units[s].removed) {
+            None => format!("elapsed, but {started} does not exist"),
+            Some(s) if !self.units[s].resting() => {
+                format!("elapsed; {started} is still running")
+            }
+            Some(_) => format!("elapsed; starting {started}"),
+        };
+        info!("{name}: {line}");
+        self.mark(slot, &line);
+        self.start_with_dependencies(started);
     }
 
     /// Notice empty jobs without relying on the job's notifications, which
@@ -883,11 +1071,24 @@ impl Manager {
         }
         let before = self.units[slot].machine.state();
         let actions = self.units[slot].machine.handle(event, Instant::now());
-        // A target's state is all a next manager has to go on.
-        if self.units[slot].machine.service().is_target()
-            && self.units[slot].machine.state() != before
-        {
+        let after = self.units[slot].machine.state();
+        // A target's or a timer's state is all a next manager has to go on.
+        if self.units[slot].machine.service().runs_nothing() && after != before {
             self.dirty = true;
+        }
+        if let Some(timer) = self.units[slot].machine.service().timer.clone() {
+            let unit = &mut self.units[slot];
+            if after == State::Active && before != State::Active {
+                let stamp = self
+                    .state_dir
+                    .as_ref()
+                    .filter(|_| timer.persistent)
+                    .and_then(|dir| state::read_stamp(dir, &unit.name));
+                unit.schedule
+                    .start(&timer, &unit.name, SystemTime::now(), stamp, random());
+            } else if after != State::Active && before == State::Active {
+                unit.schedule.stop();
+            }
         }
         // Before the actions: their replies report the transitions they cause.
         self.report(slot, before);
@@ -1075,11 +1276,30 @@ impl Manager {
         if after == before {
             return;
         }
-        self.units[slot].since = (Instant::now(), crate::log::timestamp());
+        let at_rest = |s: State| matches!(s, State::Inactive | State::Failed);
+        let unit = &mut self.units[slot];
+        unit.since = (Instant::now(), crate::log::timestamp());
+        if at_rest(before) != at_rest(after) {
+            let now = Some(SystemTime::now());
+            if at_rest(after) {
+                unit.stopped_at = now;
+            } else {
+                unit.started_at = now;
+            }
+            // A timer that starts it counts from these.
+            self.dirty = true;
+        }
         let unit = &self.units[slot];
         let name = unit.name.clone();
         let last = unit.machine.last_outcome();
         let line = match after {
+            State::Active if unit.machine.service().is_timer() => {
+                let zone = Local::current();
+                match self.next_elapse_of(slot, SystemTime::now(), &zone) {
+                    Some(next) => format!("active; next elapse {}", clock::format(next, &zone)),
+                    None => "active".to_owned(),
+                }
+            }
             State::Active => {
                 let pid = unit.main.as_ref().map(|t| t.child.pid);
                 pid.map_or("active".to_owned(), |pid| {
@@ -1185,6 +1405,25 @@ impl Manager {
             .filter(|u| u.machine.service().is_target() && u.machine.state() == State::Active)
             .map(|u| u.name.clone())
             .collect();
+        for (slot, unit) in self.units.iter().enumerate() {
+            let Some(activated) = unit.schedule.activated else {
+                continue;
+            };
+            if unit.machine.state() != State::Active {
+                continue;
+            }
+            let moments = self.moments(slot);
+            saved.timers.insert(
+                unit.name.clone(),
+                SavedTimer {
+                    activated: to_millis(activated),
+                    last_trigger: unit.schedule.last_trigger.map(to_millis),
+                    running: unit.schedule.running,
+                    unit_started: moments.unit_started.map(to_millis),
+                    unit_stopped: moments.unit_stopped.map(to_millis),
+                },
+            );
+        }
         if let Err(e) = state::save(&path, &saved) {
             error!("cannot save the state to {}: {e}", path.display());
         }
@@ -1228,6 +1467,18 @@ fn settles_empty(job: &Job) -> bool {
         std::thread::sleep(Duration::from_millis(5));
     }
     false
+}
+
+/// A random number, for `RandomizedDelaySec=`: std's hasher keys are random.
+fn random() -> u64 {
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+    );
+    hasher.finish()
 }
 
 fn no_state_dir() -> std::io::Error {

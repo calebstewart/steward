@@ -2,18 +2,21 @@
 //!
 //! [`syntax`] is the file format alone; [`parse_service`] gives the keys their
 //! meaning and reports everything it could not use. [`load_dir`] reads a unit
-//! directory.
+//! directory. [`calendar`] is `OnCalendar=`'s events, and when they come.
 
+pub mod calendar;
 mod service;
 pub mod syntax;
 pub mod time;
+mod timer;
 
 use std::path::{Path, PathBuf};
 
 pub use service::{
     parse_service, Command, Diagnostic, KillMode, Parsed, Restart, Service, ServiceType, Severity,
-    UnitKind, BUILTIN_TARGETS, DEFAULT_TARGET, GRAPHICAL_TARGET, TRAY_TARGET,
+    UnitKind, BUILTIN_TARGETS, DEFAULT_TARGET, GRAPHICAL_TARGET, TIMERS_TARGET, TRAY_TARGET,
 };
+pub use timer::{Timer, Trigger};
 
 /// Where a user's units live: `%APPDATA%\steward\units` -- the XDG config
 /// home, as winpkgs lays it out on Windows.
@@ -28,8 +31,8 @@ pub struct LoadedUnit {
     pub parsed: Parsed,
 }
 
-/// Every `*.service` and `*.target` file in `dir`, sorted by name. A missing
-/// directory is an empty one; a file that cannot be read is an error
+/// Every `*.service`, `*.target` and `*.timer` file in `dir`, sorted by name.
+/// A missing directory is an empty one; a file that cannot be read is an error
 /// diagnostic on that unit.
 pub fn load_dir(dir: &Path) -> std::io::Result<Vec<LoadedUnit>> {
     let entries = match std::fs::read_dir(dir) {
@@ -42,7 +45,7 @@ pub fn load_dir(dir: &Path) -> std::io::Result<Vec<LoadedUnit>> {
         .filter(|p| {
             p.is_file()
                 && p.extension()
-                    .is_some_and(|ext| ext == "service" || ext == "target")
+                    .is_some_and(|ext| ext == "service" || ext == "target" || ext == "timer")
         })
         .collect();
     paths.sort();
