@@ -297,9 +297,14 @@ impl Manager {
                     self.to_start.insert(unit.clone());
                     messages.push(format!("{unit}: starting"));
                 }
-                // Skip the rest of the delay.
+                // Skip the rest of the delay -- but through the plan, like any
+                // start, so the unit still waits for what it is ordered
+                // after: its pending restart is cancelled (its delay would
+                // otherwise start it on its own) and it is queued. Started
+                // on request, it starts over from the first restart delay.
                 State::AutoRestart => {
-                    self.feed(slot, UnitEvent::Start);
+                    self.feed(slot, UnitEvent::Stop);
+                    self.to_start.insert(unit.clone());
                     messages.push(format!("{unit}: starting now instead of after its delay"));
                 }
                 _ if unit == name => messages.push(format!("{unit}: already running")),
@@ -319,14 +324,17 @@ impl Manager {
                 continue;
             };
             self.to_start.remove(&unit);
-            if unit != name && self.units[slot].resting() {
+            let state = self.units[slot].machine.state();
+            // Already at rest; but one waiting out a restart delay is on its
+            // way back, and the stop cancels that.
+            if unit != name && matches!(state, State::Inactive | State::Failed) {
                 continue;
             }
             self.feed(slot, UnitEvent::Stop);
-            messages.push(if unit == name {
-                format!("{unit}: stopping")
-            } else {
-                format!("{unit}: stopping, with {name}")
+            messages.push(match (unit == name, state) {
+                (true, _) => format!("{unit}: stopping"),
+                (false, State::AutoRestart) => format!("{unit}: not restarting, with {name}"),
+                (false, _) => format!("{unit}: stopping, with {name}"),
             });
         }
         messages
