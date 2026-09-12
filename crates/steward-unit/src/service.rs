@@ -12,8 +12,18 @@
 //!   written. A leading `-` (ignore failure) is the only prefix.
 //! - `Environment=` groups words with `"` or `'`; a backslash is an ordinary
 //!   character.
-//! - `TimeoutStopSec=` defaults to 10 s rather than systemd's 90: a stop at
-//!   sign-out does not get to wait a minute and a half.
+//!
+//! The defaults favour durability, which is the point of steward, over
+//! systemd's:
+//! - `Restart=on-failure` (systemd: `no`). A service that crashes comes back
+//!   unless its unit says otherwise.
+//! - Backoff: `RestartSec=1s`, `RestartSteps=5`, `RestartMaxDelaySec=1min`
+//!   (systemd: 100 ms, no backoff). Delays grow 1 s, 2.3 s, 5.1 s ... to a
+//!   minute; with the default start limit (5 starts in 10 s) that means a
+//!   service that keeps failing keeps being retried, a minute apart, rather
+//!   than giving up after half a second.
+//! - `TimeoutStartSec=30s`, `TimeoutStopSec=10s` (systemd: 90 s each): a stop
+//!   at sign-out does not get to wait a minute and a half.
 
 use std::fmt;
 use std::time::Duration;
@@ -65,9 +75,9 @@ pub enum ServiceType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Restart {
-    #[default]
     No,
     OnSuccess,
+    #[default]
     OnFailure,
     OnAbnormal,
     Always,
@@ -111,10 +121,13 @@ pub struct Service {
     pub exec_start_post: Vec<Command>,
     pub exec_stop: Vec<Command>,
     pub restart: Restart,
+    /// The delay before the first automatic restart.
     pub restart_sec: Duration,
-    /// Number of steps from `restart_sec` to `restart_max_delay`; 0 = no backoff.
+    /// Restarts it takes for the delay to grow from `restart_sec` to
+    /// `restart_max_delay`; 0 turns the backoff off.
     pub restart_steps: u32,
-    pub restart_max_delay: Option<Duration>,
+    pub restart_max_delay: Duration,
+    pub timeout_start: Duration,
     pub timeout_stop: Duration,
     /// Unset means the user's profile directory.
     pub working_directory: Option<String>,
@@ -141,10 +154,11 @@ impl Service {
             exec_start_pre: Vec::new(),
             exec_start_post: Vec::new(),
             exec_stop: Vec::new(),
-            restart: Restart::No,
-            restart_sec: Duration::from_millis(100),
-            restart_steps: 0,
-            restart_max_delay: None,
+            restart: Restart::OnFailure,
+            restart_sec: Duration::from_secs(1),
+            restart_steps: 5,
+            restart_max_delay: Duration::from_secs(60),
+            timeout_start: Duration::from_secs(30),
             timeout_stop: Duration::from_secs(10),
             working_directory: None,
             environment: Vec::new(),
@@ -297,12 +311,18 @@ impl Reader {
             }
             "RestartSec" => self.span(e, &mut s.restart_sec),
             "RestartSteps" => self.number(e, &mut s.restart_steps),
-            "RestartMaxDelaySec" => {
+            "RestartMaxDelaySec" => self.span(e, &mut s.restart_max_delay),
+            "TimeoutStartSec" => self.span(e, &mut s.timeout_start),
+            "TimeoutStopSec" => self.span(e, &mut s.timeout_stop),
+            // Where systemd before 230 had them; it still reads them here.
+            "StartLimitBurst" => self.number(e, &mut s.start_limit_burst),
+            "StartLimitIntervalSec" => self.span(e, &mut s.start_limit_interval),
+            "TimeoutSec" => {
                 if let Some(span) = self.timespan(e) {
-                    s.restart_max_delay = Some(span);
+                    s.timeout_start = span;
+                    s.timeout_stop = span;
                 }
             }
-            "TimeoutStopSec" => self.span(e, &mut s.timeout_stop),
             "WorkingDirectory" => s.working_directory = non_empty(&e.value),
             "Environment" => self.environment(e, &mut s.environment),
             "KillMode" => {
@@ -359,8 +379,19 @@ impl Reader {
                 "Restart=always and Restart=on-success do not apply to Type=oneshot",
             );
         }
-        if s.restart_steps > 0 && s.restart_max_delay.is_none() {
-            self.warn(0, "RestartSteps= has no effect without RestartMaxDelaySec=");
+        if s.restart_steps > 0 && s.restart_max_delay < s.restart_sec {
+            self.warn(
+                0,
+                "RestartMaxDelaySec= is shorter than RestartSec=; restarts wait RestartSec=",
+            );
+        }
+        // With KillMode=process the job tracks the main process alone, and a
+        // forking service's main process is the one that exits.
+        if s.service_type == ServiceType::Forking && s.kill_mode == KillMode::Process {
+            self.error(
+                0,
+                "Type=forking needs KillMode=control-group: the daemon it starts is otherwise not tracked",
+            );
         }
     }
 
@@ -553,8 +584,14 @@ WantedBy=graphical-session.target
     fn defaults() {
         let s = ok("[Service]\nExecStart=x.exe\n");
         assert_eq!(s.service_type, ServiceType::Simple);
-        assert_eq!(s.restart, Restart::No);
-        assert_eq!(s.restart_sec, Duration::from_millis(100));
+        // Durability first: a crash is restarted, with backoff.
+        assert_eq!(s.restart, Restart::OnFailure);
+        assert_eq!(s.restart_sec, Duration::from_secs(1));
+        assert_eq!(
+            (s.restart_steps, s.restart_max_delay),
+            (5, Duration::from_secs(60))
+        );
+        assert_eq!(s.timeout_start, Duration::from_secs(30));
         assert_eq!(s.timeout_stop, Duration::from_secs(10));
         assert_eq!(s.kill_mode, KillMode::ControlGroup);
         assert_eq!(
@@ -703,11 +740,37 @@ WantedBy=graphical-session.target
         let s = ok("[Service]\nExecStart=x\nRestart=always\nRestartSec=1s\nRestartSteps=5\nRestartMaxDelaySec=1min\n");
         assert_eq!(
             (s.restart_steps, s.restart_max_delay),
-            (5, Some(Duration::from_secs(60)))
+            (5, Duration::from_secs(60))
         );
         assert_eq!(
-            messages("[Service]\nExecStart=x\nRestartSteps=3\n"),
-            ["warning: RestartSteps= has no effect without RestartMaxDelaySec="]
+            messages("[Service]\nExecStart=x\nRestartSec=2min\n"),
+            ["warning: RestartMaxDelaySec= is shorter than RestartSec=; restarts wait RestartSec="]
+        );
+        assert!(messages("[Service]\nExecStart=x\nRestartSec=2min\nRestartSteps=0\n").is_empty());
+    }
+
+    #[test]
+    fn the_start_limit_can_be_in_either_section() {
+        let s =
+            ok("[Unit]\nStartLimitBurst=2\n[Service]\nExecStart=x\nStartLimitIntervalSec=1min\n");
+        assert_eq!(
+            (s.start_limit_burst, s.start_limit_interval),
+            (2, Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn timeouts() {
+        let s = ok("[Service]\nExecStart=x\nTimeoutSec=5s\nTimeoutStopSec=3s\n");
+        assert_eq!(s.timeout_start, Duration::from_secs(5));
+        assert_eq!(s.timeout_stop, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn forking_needs_the_whole_tree() {
+        assert_eq!(
+            messages("[Service]\nType=forking\nKillMode=process\nExecStart=x\n"),
+            ["error: Type=forking needs KillMode=control-group: the daemon it starts is otherwise not tracked"]
         );
     }
 }

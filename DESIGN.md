@@ -221,11 +221,24 @@ Where Windows differs:
   as systemd does.
 
 Version 1 understands: `[Unit]` `Description`, `Documentation`, `After`,
-`Before`, `Wants`, `Requires`; `[Service]` `Type` (`simple`, `exec`,
-`forking`, `oneshot`), `ExecStart`, `ExecStartPre`, `ExecStartPost`,
-`ExecStop`, `Restart`, `RestartSec`, `TimeoutStopSec`, `WorkingDirectory`,
-`Environment`, `KillMode`; `[Install]` `WantedBy`; plus `StartLimitBurst` and
-`StartLimitIntervalSec` in `[Unit]`.
+`Before`, `Wants`, `Requires`, `StartLimitBurst`, `StartLimitIntervalSec`;
+`[Service]` `Type` (`simple`, `exec`, `forking`, `oneshot`), `ExecStart`,
+`ExecStartPre`, `ExecStartPost`, `ExecStop`, `Restart`, `RestartSec`,
+`RestartSteps`, `RestartMaxDelaySec`, `TimeoutStartSec`, `TimeoutStopSec`,
+`TimeoutSec`, `WorkingDirectory`, `Environment`, `KillMode`; `[Install]`
+`WantedBy`.
+
+**The defaults favour durability over systemd's.** A unit that says nothing
+gets `Restart=on-failure` (systemd: `no`) and a backoff from `RestartSec=1s`
+to `RestartMaxDelaySec=1min` over `RestartSteps=5` (systemd: 100 ms, flat).
+With the default start limit (5 starts in 10 s), a service that keeps failing
+is retried a minute apart indefinitely -- and shows its restart count --
+instead of giving up half a second after sign-in. A unit that wants to fail
+fast says so. Timeouts are shorter than systemd's: `TimeoutStartSec=30s`,
+`TimeoutStopSec=10s`, because sign-out does not wait a minute and a half.
+
+`Type=forking` requires `KillMode=control-group`: with `KillMode=process` the
+job tracks only the main process, which is the one that exits.
 
 Built-in targets: `default.target` (sign-in) and `graphical-session.target`
 (the shell is ready).
