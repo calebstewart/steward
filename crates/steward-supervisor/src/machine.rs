@@ -98,8 +98,9 @@ pub enum Event {
     Exited(Process, u32),
     /// The service's job has no processes left.
     JobEmpty,
-    /// Some process in the job ended with an exception (how a `Type=forking`
-    /// daemon's crash is noticed, its exit code being nobody's to collect).
+    /// Some process in the job ended with an NTSTATUS error -- an exception,
+    /// or a Ctrl+C -- (how a `Type=forking` daemon's crash is noticed, its
+    /// exit code being nobody's to collect).
     Crashed(u32),
     Deadline,
 }
@@ -297,7 +298,7 @@ impl Machine {
                 self.end(false, classify(code), now, out)
             }
             (Active, JobEmpty) if self.is_forking() => {
-                let outcome = self.crashed.map_or(Outcome::Vanished, Outcome::Crashed);
+                let outcome = self.crashed.map_or(Outcome::Vanished, classify);
                 self.end(false, outcome, now, out);
             }
 
@@ -466,7 +467,7 @@ impl Machine {
             // A oneshot that has run all of its commands is done.
             ServiceType::Oneshot => self.end(false, Outcome::Clean, now, out),
             ServiceType::Forking if self.job_empty => {
-                let outcome = self.crashed.map_or(Outcome::Vanished, Outcome::Crashed);
+                let outcome = self.crashed.map_or(Outcome::Vanished, classify);
                 self.end(false, outcome, now, out);
             }
             _ => {
@@ -686,6 +687,39 @@ mod tests {
         h.feed(JobEmpty);
         assert_eq!(h.state(), State::AutoRestart);
         assert_eq!(h.machine.last_outcome(), Some(Outcome::Crashed(CRASH)));
+    }
+
+    const CTRL_C: u32 = 0xC000_013A;
+
+    #[test]
+    fn a_ctrl_c_from_elsewhere_is_restarted() {
+        let mut h = Harness::new("ExecStart=app.exe\n");
+        h.feed(Start);
+        assert_eq!(h.main_exits(CTRL_C), []);
+        assert_eq!(h.state(), State::AutoRestart);
+        assert_eq!(h.machine.last_outcome(), Some(Outcome::Interrupted));
+    }
+
+    #[test]
+    fn a_forking_daemon_ended_by_ctrl_c_was_interrupted() {
+        let mut h = Harness::new("Type=forking\nExecStart=launcher.exe\n");
+        h.feed(Start);
+        h.feed(Exited(Main, 0));
+        assert_eq!(h.state(), State::Active);
+        h.feed(Crashed(CTRL_C));
+        h.feed(JobEmpty);
+        assert_eq!(h.state(), State::AutoRestart);
+        assert_eq!(h.machine.last_outcome(), Some(Outcome::Interrupted));
+    }
+
+    #[test]
+    fn the_ctrl_c_of_a_stop_is_a_clean_end() {
+        let mut h = Harness::new("ExecStart=app.exe\n");
+        h.feed(Start);
+        assert_eq!(h.feed(Stop), [AskToExit]);
+        h.main_exits(CTRL_C);
+        assert_eq!(h.state(), State::Inactive);
+        assert_eq!(h.machine.last_outcome(), Some(Outcome::Clean));
     }
 
     #[test]

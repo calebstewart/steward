@@ -9,10 +9,17 @@ use steward_unit::{Restart, Service};
 /// Why a service (or one of its commands) ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    /// Exit code 0, or ended by the Ctrl+C it was sent.
+    /// Exit code 0.
     Clean,
     /// A non-zero exit code.
     ExitCode(u32),
+    /// Ended by a Ctrl+C, or its console closing (`STATUS_CONTROL_C_EXIT`).
+    /// When steward stops a service it sends that Ctrl+C itself, and the stop
+    /// being asked for is what counts; a Ctrl+C from anywhere else is a
+    /// failure, where systemd would count SIGINT as clean. Durability first:
+    /// the likeliest sender is Windows ending a session, and the service
+    /// should come back.
+    Interrupted,
     /// An exception: the exit code is an NTSTATUS error (0xC0000000 and up),
     /// such as an access violation or a failed stack check.
     Crashed(u32),
@@ -39,6 +46,7 @@ impl std::fmt::Display for Outcome {
         match self {
             Outcome::Clean => write!(f, "exited cleanly"),
             Outcome::ExitCode(code) => write!(f, "exited with code {code}"),
+            Outcome::Interrupted => write!(f, "was interrupted by Ctrl+C or its console closing"),
             Outcome::Crashed(code) => write!(f, "crashed (exception 0x{code:08X})"),
             Outcome::Vanished => write!(f, "all of its processes exited"),
             Outcome::Timeout => write!(f, "timed out"),
@@ -51,11 +59,12 @@ impl std::fmt::Display for Outcome {
 
 /// The ending a process exit code describes.
 pub fn classify(code: u32) -> Outcome {
-    // What a console program's default handler exits with on Ctrl+C: the stop
-    // steward asked for, not a crash.
+    // What a console program's default handler exits with on Ctrl+C: an
+    // interruption, not a crash.
     const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
     match code {
-        0 | STATUS_CONTROL_C_EXIT => Outcome::Clean,
+        0 => Outcome::Clean,
+        STATUS_CONTROL_C_EXIT => Outcome::Interrupted,
         c if c >= 0xC000_0000 => Outcome::Crashed(c),
         c => Outcome::ExitCode(c),
     }
@@ -72,7 +81,8 @@ pub fn should_restart(policy: Restart, outcome: Outcome) -> bool {
             Restart::Always => true,
             Restart::OnSuccess => outcome.is_clean(),
             Restart::OnFailure => !outcome.is_clean(),
-            Restart::OnAbnormal => matches!(outcome, Crashed(_) | Timeout),
+            // An interruption is abnormal as systemd's unclean signals are.
+            Restart::OnAbnormal => matches!(outcome, Interrupted | Crashed(_) | Timeout),
         },
     }
 }
@@ -145,7 +155,7 @@ mod tests {
     #[test]
     fn exit_codes() {
         assert_eq!(classify(0), Outcome::Clean);
-        assert_eq!(classify(0xC000_013A), Outcome::Clean);
+        assert_eq!(classify(0xC000_013A), Outcome::Interrupted);
         assert_eq!(classify(1), Outcome::ExitCode(1));
         assert_eq!(classify(0xC000_0005), Outcome::Crashed(0xC000_0005));
         assert_eq!(classify(0xC000_0409), Outcome::Crashed(0xC000_0409));
@@ -155,15 +165,19 @@ mod tests {
     fn restart_policies() {
         use Outcome::*;
         let cases = [
-            (Restart::No, [false, false, false, false, false]),
-            (Restart::Always, [true, true, true, true, true]),
-            (Restart::OnSuccess, [true, false, false, false, false]),
-            (Restart::OnFailure, [false, true, true, true, true]),
-            (Restart::OnAbnormal, [false, false, true, true, false]),
+            (Restart::No, [false, false, false, false, false, false]),
+            (Restart::Always, [true, true, true, true, true, true]),
+            (
+                Restart::OnSuccess,
+                [true, false, false, false, false, false],
+            ),
+            (Restart::OnFailure, [false, true, true, true, true, true]),
+            (Restart::OnAbnormal, [false, false, true, true, true, false]),
         ];
         let outcomes = [
             Clean,
             ExitCode(1),
+            Interrupted,
             Crashed(0xC000_0005),
             Timeout,
             SpawnFailed,

@@ -783,12 +783,11 @@ impl Manager {
                     self.feed(slot, UnitEvent::JobEmpty);
                 }
             }
+            // Any NTSTATUS error: a crash, or the exit of a Ctrl+C.
             JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS => {
                 let code = process::exit_code_of(pid).unwrap_or(STATUS_UNSUCCESSFUL);
-                self.mark(
-                    slot,
-                    &format!("process {pid} crashed (exception 0x{code:08X})"),
-                );
+                let outcome = steward_supervisor::policy::classify(code);
+                self.mark(slot, &format!("process {pid} {outcome}"));
                 self.feed(slot, UnitEvent::Crashed(code));
                 self.dirty = true;
             }

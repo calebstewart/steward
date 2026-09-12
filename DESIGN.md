@@ -313,6 +313,13 @@ instead of giving up half a second after sign-in. A unit that wants to fail
 fast says so. Timeouts are shorter than systemd's: `TimeoutStartSec=30s`,
 `TimeoutStopSec=10s`, because sign-out does not wait a minute and a half.
 
+A console program ended by a Ctrl+C that steward did not send, or by its
+console closing (`STATUS_CONTROL_C_EXIT`), has *failed*, where systemd counts
+SIGINT as clean: nothing a user does sends a windowless service Ctrl+C, and
+the likeliest sender is Windows ending a session, after which the service
+should come back. The Ctrl+C steward sends when it stops a service is part of
+a stop that was asked for, and that stop ends it cleanly.
+
 `Type=forking` requires `KillMode=control-group`: with `KillMode=process` the
 job tracks only the main process, which is the one that exits.
 
