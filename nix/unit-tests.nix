@@ -1,5 +1,5 @@
-# The tests of the crates with no Windows in them -- the unit parser and the
-# supervisor's state machine -- run natively.
+# The tests of the crates with no Windows in them -- the unit parser, the
+# supervisor's state machine, the control protocol -- run natively.
 { lib, rustPlatform }:
 rustPlatform.buildRustPackage {
   pname = "steward-native-tests";
@@ -20,12 +20,16 @@ rustPlatform.buildRustPackage {
     "steward-unit"
     "-p"
     "steward-supervisor"
+    "-p"
+    "steward-ipc"
   ];
   cargoTestFlags = [
     "-p"
     "steward-unit"
     "-p"
     "steward-supervisor"
+    "-p"
+    "steward-ipc"
   ];
 
   # A library has nothing to install; the check passing is the product.

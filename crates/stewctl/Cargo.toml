@@ -8,4 +8,5 @@ publish.workspace = true
 
 [dependencies]
 steward-unit.workspace = true
+steward-ipc.workspace = true
 clap = { version = "4", features = ["derive"] }

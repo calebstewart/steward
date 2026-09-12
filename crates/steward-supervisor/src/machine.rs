@@ -141,6 +141,8 @@ pub struct Machine {
     crashed: Option<u32>,
     ending: Option<Ending>,
     start_after_stop: bool,
+    /// A definition waiting for the next start.
+    pending: Option<Service>,
 }
 
 impl Machine {
@@ -162,6 +164,7 @@ impl Machine {
             crashed: None,
             ending: None,
             start_after_stop: false,
+            pending: None,
         }
     }
 
@@ -186,6 +189,31 @@ impl Machine {
     /// When to feed `Deadline`.
     pub fn deadline(&self) -> Option<Instant> {
         self.deadline
+    }
+
+    /// A new definition for the service (its unit file changed). A service at
+    /// rest takes it at once; a running one keeps the definition it was
+    /// started with -- its `ExecStop=` included -- until its next start.
+    pub fn replace(&mut self, service: Service) {
+        if matches!(
+            self.state,
+            State::Inactive | State::Failed | State::AutoRestart
+        ) {
+            self.service = service;
+            self.pending = None;
+        } else {
+            self.pending = Some(service);
+        }
+    }
+
+    /// The definition the service will start with next.
+    pub fn next_service(&self) -> &Service {
+        self.pending.as_ref().unwrap_or(&self.service)
+    }
+
+    /// Running with a definition that has since changed.
+    pub fn is_changed(&self) -> bool {
+        self.pending.is_some()
     }
 
     /// Do not start after all: a unit this one requires failed.
@@ -361,6 +389,9 @@ impl Machine {
 
     fn begin_start(&mut self, now: Instant, out: &mut Vec<Action>) {
         self.deadline = None;
+        if let Some(service) = self.pending.take() {
+            self.service = service;
+        }
         if !self.start_limit.allow(&self.service, now) {
             self.last = Some(Outcome::StartLimit);
             self.state = State::Failed;
@@ -901,6 +932,33 @@ mod tests {
         h.feed(JobEmpty);
         assert_eq!(h.state(), State::AutoRestart);
         assert_eq!(h.machine.last_outcome(), Some(Outcome::Vanished));
+    }
+
+    #[test]
+    fn a_new_definition_waits_for_the_next_start() {
+        let mut h = Harness::new("ExecStart=old.exe\nExecStop=old.exe --quit\n");
+        h.feed(Start);
+        let new = parse_service("t.service", "[Service]\nExecStart=new.exe\n")
+            .service
+            .unwrap();
+        h.machine.replace(new);
+        assert_eq!(h.machine.next_service().exec_start[0].line, "new.exe");
+        // The running service stops the way it was started.
+        assert_eq!(h.feed(Stop), [SpawnControl(cmd("old.exe --quit"))]);
+        h.feed(Start);
+        h.feed(JobEmpty);
+        h.feed(Exited(Main, 0));
+        assert_eq!(h.feed(Exited(Control, 0)), [SpawnMain(cmd("new.exe"))]);
+    }
+
+    #[test]
+    fn a_resting_service_takes_a_new_definition_at_once() {
+        let mut h = Harness::new("ExecStart=old.exe\n");
+        let new = parse_service("t.service", "[Service]\nExecStart=new.exe\n")
+            .service
+            .unwrap();
+        h.machine.replace(new);
+        assert_eq!(h.machine.service().exec_start[0].line, "new.exe");
     }
 
     #[test]

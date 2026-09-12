@@ -210,12 +210,36 @@ template.
 
 ## Control plane
 
-A named pipe, `\\.\pipe\steward-<user SID>`, whose DACL admits only the user.
-The manager creates it with `FILE_FLAG_FIRST_PIPE_INSTANCE` so nothing can
-squat the name first, and `stewctl` checks the server process's identity
-before trusting it. Requests and replies are line-delimited JSON. The verbs
-follow `systemctl`: `start`, `stop`, `restart`, `status`, `list-units`,
-`enable`, `disable`, `daemon-reload`, `logs`, `is-active`.
+A named pipe, `\\.\pipe\steward-<user SID>`, whose DACL admits only the user
+and which refuses remote clients. The manager creates its single instance
+with `FILE_FLAG_FIRST_PIPE_INSTANCE` and reuses it client after client, so the
+name is never free to take; `stewctl` opens it at `SecurityIdentification`
+and checks that the process serving it runs as the user before sending
+anything. One request and one response, each a line of JSON
+(`steward-ipc`). A thread serves the pipe and hands each request to the
+manager's loop, so the manager's state stays on one thread.
+
+The pipe is also the manager's lock: a second manager for the same user
+cannot create it and does not start (a `--console` manager while the
+per-user service runs, say). Pipe names are machine-wide, so another account
+could take the name first and keep steward from starting; not a concern on a
+single-user machine, noted for others.
+
+The verbs follow `systemctl`: `list-units` (the default), `status [unit...]`,
+`start`, `stop`, `restart` (waiting for the units to settle unless
+`--no-block`), `is-active`, `daemon-reload`, and `logs [-f] [-n N]`, which
+reads the log file itself. `whkd` means `whkd.service`. Two differ:
+
+- **`switch`** reads the unit files and makes what runs match them: removed
+  units stop, changed running units restart with their new definition, and
+  wanted units that are not running start. It is what an apply runs, the way
+  home-manager runs `sd-switch`. `daemon-reload` alone only takes note: a
+  changed unit keeps running as it was started (its `ExecStop=` included)
+  until it is restarted, and is marked changed until then.
+- **No `enable`/`disable`.** A unit is enabled by its `[Install] WantedBy=`;
+  the unit files are declared (by Nix), so there is no second source of truth
+  to keep. A unit is stopped for the session with `stop`, and for good by
+  removing it.
 
 ## Unit files
 
@@ -307,7 +331,10 @@ build remaps them.
   `--console` mode with throwaway units: ordering, crash backoff, forking
   services, `KillMode=process`, a stop that needs the kill, and adoption of
   every service by a manager started after the first was killed.
-- **M2** -- control plane and journal: the pipe, `stewctl` verbs, logs.
+- **M2** (done) -- control plane and logs: the pipe, `stewctl` verbs,
+  `switch`, `logs -f`. Exercised against a `--console` manager: queries,
+  stop/start/restart, a second manager refused, a unit edited, one added and
+  one removed while running, and `daemon-reload` then `switch`.
 - **M3** -- winpkgs integration: the service resource in winpkgs, the two
   modules, activation hooks.
 - **M4** -- move whkd, komorebi, masir, Flow Launcher and thide off Run keys.

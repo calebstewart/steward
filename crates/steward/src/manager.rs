@@ -17,11 +17,12 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use steward_ipc::{ManagerStatus, Request, Response, UnitStatus};
 use steward_supervisor::plan::{DEFAULT_TARGET, GRAPHICAL_TARGET};
 use steward_supervisor::{
     Action, Decision, Event as UnitEvent, Machine, Outcome, Plan, Process, Progress, State,
 };
-use steward_unit::{Command, KillMode, Severity};
+use steward_unit::{Command, KillMode, Service};
 use windows_sys::core::BOOL;
 use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
 use windows_sys::Win32::System::SystemServices::{
@@ -29,6 +30,7 @@ use windows_sys::Win32::System::SystemServices::{
     JOB_OBJECT_MSG_EXIT_PROCESS, JOB_OBJECT_MSG_NEW_PROCESS,
 };
 
+use crate::control;
 use crate::log::{error, info, warning};
 use crate::state::{self, Saved, SavedProcess, SavedUnit};
 use crate::sys::job::Job;
@@ -62,6 +64,8 @@ pub enum Control {
     StopAll(String),
     /// Something worth a line in the log.
     Note(String),
+    /// A `stewctl` request, and where its answer goes.
+    Request(Request, Sender<Response>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -78,6 +82,10 @@ struct Tracked {
 
 struct Unit {
     name: String,
+    /// Its unit file is gone; it is forgotten once it is at rest.
+    removed: bool,
+    /// When it entered its current state, and that time as text.
+    since: (Instant, String),
     machine: Machine,
     job: Option<Job>,
     job_serial: usize,
@@ -88,6 +96,20 @@ struct Unit {
 }
 
 impl Unit {
+    fn new(service: Service) -> Unit {
+        Unit {
+            name: service.name.clone(),
+            removed: false,
+            since: (Instant::now(), crate::log::timestamp()),
+            machine: Machine::new(service),
+            job: None,
+            job_serial: 0,
+            job_empty_fed: true,
+            main: None,
+            control: None,
+        }
+    }
+
     fn progress(&self) -> Progress {
         Progress::from(self.machine.state())
     }
@@ -116,9 +138,15 @@ struct Manager {
     stdin: Option<OwnedHandle>,
 }
 
-/// Run the manager until it is told to stop or detach.
-pub fn run(port: Port, inbox: Receiver<Control>) {
+/// Run the manager until it is told to stop or detach. `controls` is the
+/// sending end of `inbox`, for the control plane.
+pub fn run(port: Port, controls: Sender<Control>, inbox: Receiver<Control>) {
     info!("steward {} starting", env!("CARGO_PKG_VERSION"));
+    // The pipe is also the lock: one manager per user.
+    if let Err(e) = control::listen(controls, port.waker()) {
+        error!("cannot serve the control pipe: {e}; not starting");
+        return;
+    }
     let mut manager = Manager {
         port,
         inbox,
@@ -146,49 +174,32 @@ pub fn run(port: Port, inbox: Receiver<Control>) {
 
 impl Manager {
     fn load_units(&mut self) {
-        let Some(dir) = steward_unit::user_unit_dir() else {
-            error!("APPDATA is not set; cannot find the unit directory");
-            return;
-        };
-        let loaded = match steward_unit::load_dir(&dir) {
-            Ok(units) => units,
-            Err(e) => {
-                error!("cannot read {}: {e}", dir.display());
-                return;
-            }
-        };
-        info!("{} unit(s) in {}", loaded.len(), dir.display());
-        for unit in loaded {
-            let name = unit
-                .path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            for diagnostic in &unit.parsed.diagnostics {
-                match diagnostic.severity {
-                    Severity::Warning => warning!("{name}: {diagnostic}"),
-                    Severity::Error => error!("{name}: {diagnostic}"),
+        match read_units() {
+            Ok((services, messages)) => {
+                for message in messages {
+                    warning!("{message}");
+                }
+                for service in services {
+                    self.units.push(Unit::new(service));
                 }
             }
-            match unit.parsed.service {
-                Some(service) => self.units.push(Unit {
-                    name,
-                    machine: Machine::new(service),
-                    job: None,
-                    job_serial: 0,
-                    job_empty_fed: true,
-                    main: None,
-                    control: None,
-                }),
-                None => error!("{name}: not loaded"),
-            }
+            Err(e) => error!("{e}"),
         }
-        let (plan, warnings) = Plan::new(self.units.iter().map(|u| u.machine.service()));
-        for warning in warnings {
+        self.replan();
+    }
+
+    fn replan(&mut self) -> Vec<String> {
+        let (plan, warnings) = Plan::new(
+            self.units
+                .iter()
+                .filter(|u| !u.removed)
+                .map(|u| u.machine.next_service()),
+        );
+        for warning in &warnings {
             warning!("{warning}");
         }
         self.plan = plan;
+        warnings
     }
 
     fn slot(&self, name: &str) -> Option<usize> {
@@ -205,6 +216,240 @@ impl Manager {
             if self.progress(&name) == Progress::Idle {
                 self.to_start.insert(name);
             }
+        }
+    }
+
+    // ---- requests from stewctl ------------------------------------------
+
+    fn answer(&mut self, request: Request) -> Response {
+        let units = match &request {
+            Request::Status { units }
+            | Request::Start { units }
+            | Request::Stop { units }
+            | Request::Restart { units } => units.clone(),
+            Request::Reload { .. } => Vec::new(),
+        };
+        let mut slots = Vec::new();
+        for name in &units {
+            match self.slot(name).filter(|&s| !self.units[s].removed) {
+                Some(slot) => slots.push(slot),
+                None => return Response::error(format!("no such unit: {name}")),
+            }
+        }
+        let mut messages = Vec::new();
+        match request {
+            Request::Status { units } => {
+                if units.is_empty() {
+                    slots = (0..self.units.len())
+                        .filter(|&s| !self.units[s].removed)
+                        .collect();
+                }
+                return Response {
+                    manager: Some(self.manager_status()),
+                    units: slots.into_iter().map(|s| self.unit_status(s)).collect(),
+                    ..Response::default()
+                };
+            }
+            Request::Reload { apply } => return self.reload(apply),
+            Request::Start { .. } | Request::Restart { .. } if self.exit.is_some() => {
+                return Response::error("steward is shutting down");
+            }
+            Request::Start { units } => {
+                for name in units {
+                    messages.extend(self.start_with_dependencies(&name));
+                }
+            }
+            Request::Stop { units } => {
+                for (name, slot) in units.into_iter().zip(slots) {
+                    self.to_start.remove(&name);
+                    self.feed(slot, UnitEvent::Stop);
+                    messages.push(format!("{name}: stopping"));
+                }
+            }
+            Request::Restart { .. } => {
+                for slot in slots {
+                    messages.extend(self.restart(slot));
+                }
+            }
+        }
+        Response {
+            messages,
+            ..Response::default()
+        }
+    }
+
+    /// Queue `name` and what it wants or requires for starting, if they are
+    /// not running already.
+    fn start_with_dependencies(&mut self, name: &str) -> Vec<String> {
+        let mut messages = Vec::new();
+        for unit in self.plan.with_dependencies(name) {
+            let Some(slot) = self.slot(&unit) else {
+                continue;
+            };
+            match self.units[slot].machine.state() {
+                State::Inactive | State::Failed => {
+                    self.to_start.insert(unit.clone());
+                    messages.push(format!("{unit}: starting"));
+                }
+                // Skip the rest of the delay.
+                State::AutoRestart => {
+                    self.feed(slot, UnitEvent::Start);
+                    messages.push(format!("{unit}: starting now instead of after its delay"));
+                }
+                _ if unit == name => messages.push(format!("{unit}: already running")),
+                _ => {}
+            }
+        }
+        messages
+    }
+
+    fn restart(&mut self, slot: usize) -> Vec<String> {
+        let name = self.units[slot].name.clone();
+        if self.units[slot].resting() {
+            return self.start_with_dependencies(&name);
+        }
+        // A running unit restarts through its stop: the machine starts it
+        // again once the stop is done, with its newest definition.
+        self.feed(slot, UnitEvent::Stop);
+        self.feed(slot, UnitEvent::Start);
+        vec![format!("{name}: restarting")]
+    }
+
+    /// Read the unit files again; with `apply`, make what runs match them.
+    fn reload(&mut self, apply: bool) -> Response {
+        let (services, mut messages) = match read_units() {
+            Ok(read) => read,
+            Err(e) => return Response::error(e),
+        };
+        let mut fresh: std::collections::BTreeMap<String, Service> =
+            services.into_iter().map(|s| (s.name.clone(), s)).collect();
+
+        for slot in 0..self.units.len() {
+            let unit = &mut self.units[slot];
+            if unit.removed || fresh.contains_key(&unit.name) {
+                continue;
+            }
+            unit.removed = true;
+            let name = unit.name.clone();
+            self.to_start.remove(&name);
+            if self.units[slot].resting() {
+                messages.push(format!("{name}: removed"));
+            } else {
+                messages.push(format!("{name}: removed; stopping it"));
+            }
+            // Stopping a unit at rest cancels any restart it is waiting for.
+            self.feed(slot, UnitEvent::Stop);
+        }
+
+        let mut changed = Vec::new();
+        for (name, service) in std::mem::take(&mut fresh) {
+            match self.slot(&name) {
+                Some(slot) => {
+                    let unit = &mut self.units[slot];
+                    let came_back = std::mem::take(&mut unit.removed);
+                    if came_back || *unit.machine.next_service() != service {
+                        unit.machine.replace(service);
+                        messages.push(format!("{name}: changed"));
+                        changed.push(name);
+                    }
+                }
+                None => {
+                    messages.push(format!("{name}: new"));
+                    self.units.push(Unit::new(service));
+                    changed.push(name);
+                }
+            }
+        }
+        messages.extend(self.replan());
+
+        if apply && self.exit.is_none() {
+            // Changed by this reload or an earlier one without --apply: what
+            // runs differs from what is on disk.
+            for unit in &self.units {
+                if !unit.removed && unit.machine.is_changed() && !changed.contains(&unit.name) {
+                    changed.push(unit.name.clone());
+                }
+            }
+            for name in &changed {
+                let Some(slot) = self.slot(name) else {
+                    continue;
+                };
+                if !self.units[slot].resting() {
+                    messages.extend(self.restart(slot));
+                }
+            }
+            let mut wanted = self.plan.pulled_in_by(DEFAULT_TARGET);
+            if self.graphical {
+                wanted.extend(self.plan.pulled_in_by(GRAPHICAL_TARGET));
+            }
+            for name in wanted {
+                let Some(slot) = self.slot(&name) else {
+                    continue;
+                };
+                let state = self.units[slot].machine.state();
+                // A failed unit is tried again once its definition changes.
+                let retry = state == State::Failed && changed.contains(&name);
+                if state == State::Inactive || retry {
+                    self.to_start.insert(name.clone());
+                    messages.push(format!("{name}: starting"));
+                }
+            }
+        }
+        info!(
+            "reloaded the units{}",
+            if apply { " and applied them" } else { "" }
+        );
+        Response {
+            messages,
+            ..Response::default()
+        }
+    }
+
+    /// Units whose files are gone, once they are at rest.
+    fn forget_removed(&mut self) {
+        self.units
+            .retain(|u| !(u.removed && u.resting() && u.job.is_none() && u.main.is_none()));
+    }
+
+    fn manager_status(&self) -> ManagerStatus {
+        let text = |p: Option<PathBuf>| p.map(|p| p.display().to_string()).unwrap_or_default();
+        ManagerStatus {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            pid: std::process::id(),
+            graphical_session: self.graphical,
+            unit_dir: text(steward_unit::user_unit_dir()),
+            log_dir: text(self.state_dir.as_ref().map(|d| d.join("logs"))),
+        }
+    }
+
+    fn unit_status(&self, slot: usize) -> UnitStatus {
+        let unit = &self.units[slot];
+        let service = unit.machine.service();
+        let state = unit.machine.state();
+        let now = Instant::now();
+        UnitStatus {
+            name: unit.name.clone(),
+            description: service.description.clone(),
+            path: steward_unit::user_unit_dir()
+                .map(|d| d.join(&unit.name).display().to_string())
+                .unwrap_or_default(),
+            state: state.name().to_owned(),
+            main_pid: unit.main.as_ref().map(|t| t.child.pid),
+            pids: unit
+                .job
+                .as_ref()
+                .and_then(|j| j.pids().ok())
+                .unwrap_or_default(),
+            restarts: unit.machine.restarts(),
+            last_outcome: unit.machine.last_outcome().map(|o| o.to_string()),
+            since: Some(unit.since.1.clone()),
+            for_secs: Some(now.duration_since(unit.since.0).as_secs()),
+            restart_in_secs: (state == State::AutoRestart)
+                .then(|| unit.machine.deadline())
+                .flatten()
+                .map(|d| d.saturating_duration_since(now).as_secs_f64()),
+            wanted_by: service.wanted_by.clone(),
+            changed: unit.machine.is_changed(),
         }
     }
 
@@ -278,6 +523,7 @@ impl Manager {
         loop {
             self.read_controls();
             self.plan_step();
+            self.forget_removed();
             match self.exit {
                 Some(Exit::Detach) => break,
                 Some(Exit::StopAll)
@@ -328,6 +574,10 @@ impl Manager {
         while let Ok(control) = self.inbox.try_recv() {
             match control {
                 Control::Note(note) => info!("{note}"),
+                Control::Request(request, reply) => {
+                    let response = self.answer(request);
+                    let _ = reply.send(response);
+                }
                 Control::Detach(reason) => {
                     if self.exit == Some(Exit::StopAll) {
                         info!("{reason}; already stopping everything, which continues");
@@ -727,6 +977,8 @@ impl Manager {
         if after == before {
             return;
         }
+        self.units[slot].since = (Instant::now(), crate::log::timestamp());
+        let unit = &self.units[slot];
         let name = unit.name.clone();
         let last = unit.machine.last_outcome();
         let line = match after {
@@ -831,6 +1083,33 @@ impl Manager {
     }
 }
 
+/// Every unit in the unit directory that loads, and a line for each problem.
+fn read_units() -> Result<(Vec<Service>, Vec<String>), String> {
+    let dir = steward_unit::user_unit_dir()
+        .ok_or("APPDATA is not set; cannot find the unit directory")?;
+    let loaded =
+        steward_unit::load_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    let mut services = Vec::new();
+    let mut messages = Vec::new();
+    for unit in loaded {
+        let name = unit
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        for diagnostic in &unit.parsed.diagnostics {
+            messages.push(format!("{name}: {diagnostic}"));
+        }
+        match unit.parsed.service {
+            Some(service) => services.push(service),
+            None => messages.push(format!("{name}: not loaded")),
+        }
+    }
+    info!("{} unit(s) in {}", services.len(), dir.display());
+    Ok((services, messages))
+}
+
 /// Whether the job is empty, or about to be: a console program's console
 /// host lives in the job too, and outlasts the program by a moment.
 fn settles_empty(job: &Job) -> bool {
@@ -871,7 +1150,7 @@ pub fn run_console() {
         }
     };
     let (controls, inbox) = mpsc::channel();
-    let _ = CONSOLE.set((controls, port.waker()));
+    let _ = CONSOLE.set((controls.clone(), port.waker()));
     unsafe { SetConsoleCtrlHandler(Some(on_console_ctrl), 1) };
-    run(port, inbox);
+    run(port, controls, inbox);
 }

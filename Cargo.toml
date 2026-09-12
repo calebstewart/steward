@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/steward-unit", "crates/steward-supervisor", "crates/steward", "crates/stewctl"]
+members = [
+    "crates/steward-unit",
+    "crates/steward-supervisor",
+    "crates/steward-ipc",
+    "crates/steward",
+    "crates/stewctl",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,3 +17,4 @@ publish = false
 [workspace.dependencies]
 steward-unit = { path = "crates/steward-unit" }
 steward-supervisor = { path = "crates/steward-supervisor" }
+steward-ipc = { path = "crates/steward-ipc" }

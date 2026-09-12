@@ -201,9 +201,19 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "steward-ipc",
  "steward-supervisor",
  "steward-unit",
  "windows-service",
+ "windows-sys",
+]
+
+[[package]]
+name = "steward-ipc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "windows-sys",
 ]
 
@@ -223,6 +233,7 @@ name = "stewctl"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "steward-ipc",
  "steward-unit",
 ]
 

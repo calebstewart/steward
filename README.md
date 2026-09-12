@@ -7,8 +7,44 @@ and tells you what they are doing.
 - `steward` -- the manager, hosted by the SCM as a per-user service.
 - `stewctl` -- the command line.
 
-Early days: see [DESIGN.md](DESIGN.md) for the design, what has been
-established on a real machine, and the roadmap.
+See [DESIGN.md](DESIGN.md) for the design, what has been established on a real
+machine, and the roadmap. Supervision (M1) and the control plane (M2) are
+done; integration with winpkgs (M3) is next.
+
+## Units
+
+Units are systemd's syntax, in `%APPDATA%\steward\units\*.service`:
+
+```ini
+[Unit]
+Description=Hotkey daemon
+After=graphical-session.target
+
+[Service]
+ExecStart="C:\Program Files\whkd\bin\whkd.exe"
+KillMode=process
+
+[Install]
+WantedBy=graphical-session.target
+```
+
+`ExecStart=` is a Windows command line, as written. A unit that says nothing
+about restarting is restarted when it fails, with a backoff from a second to a
+minute. `graphical-session.target` is reached once Explorer's taskbar exists.
+`stewctl verify` checks unit files without a manager.
+
+## Using it
+
+```
+stewctl                    # list the units
+stewctl status whkd        # one unit in detail, with the end of its log
+stewctl start|stop|restart whkd
+stewctl logs -f whkd       # its output, and steward's lines about it
+stewctl switch             # re-read the units; restart the changed, start the wanted
+```
+
+Each unit's output goes to `%LOCALAPPDATA%\steward\logs\<unit>.log`; the
+manager's own log is `%LOCALAPPDATA%\steward\steward.log`.
 
 ## Building
 
@@ -23,23 +59,37 @@ With Nix (on Linux or in WSL), cross-compiled for Windows:
 
 ```
 nix build          # result/bin/steward.exe, result/bin/stewctl.exe
-nix flake check    # the parser's tests natively, and the Windows build
+nix flake check    # the platform-free crates' tests natively, and the Windows build
 ```
 
 ## Trying the manager without installing it
 
 ```
-cargo run -p steward -- --console
+steward --console
 ```
 
-runs the manager in the foreground against your unit directory
-(`%APPDATA%\steward\units`) until Ctrl+C.
+runs the manager in the foreground until Ctrl+C, which stops every service
+(a second Ctrl+C leaves them running for the next manager to adopt). Only one
+manager runs per user. To try it without touching your own directories, point
+`APPDATA` and `LOCALAPPDATA` at scratch directories in that console first: the
+unit directory, logs and state follow them (the services still get your real
+environment).
+
+## Installing it as a per-user service
+
+Once, from an administrator prompt (winpkgs will do this in M3):
 
 ```
-cargo run -p stewctl -- verify
+mkdir "C:\Program Files\steward"
+copy steward.exe stewctl.exe "C:\Program Files\steward"
+sc create steward type= userown start= auto binPath= "\"C:\Program Files\steward\steward.exe\""
+sc failure steward reset= 60 actions= restart/5000/restart/5000/restart/5000
 ```
 
-checks every unit file in that directory.
+Windows starts an instance, `steward_<suffix>`, at every sign-in, so sign out
+and in. Anything a unit now runs should no longer be started by a Run key or
+the Startup folder, or it will run twice. To remove it: `sc stop` and
+`sc delete` the instance, `sc delete steward`, and delete the directory.
 
 ## License
 

@@ -60,6 +60,7 @@ fn host(name: &str) -> windows_service::Result<()> {
     let waker = port.waker();
     let session = own_session();
     let (controls, inbox) = mpsc::channel();
+    let for_manager = controls.clone();
     let handler = move |control: ServiceControl| -> ServiceControlHandlerResult {
         let message = match control {
             ServiceControl::Interrogate => return ServiceControlHandlerResult::NoError,
@@ -101,7 +102,7 @@ fn host(name: &str) -> windows_service::Result<()> {
     status.set_service_status(running.clone())?;
     info!("running as the SCM service {name}, session {session}");
 
-    manager::run(port, inbox);
+    manager::run(port, for_manager, inbox);
 
     status.set_service_status(ServiceStatus {
         current_state: ServiceState::Stopped,

@@ -10,6 +10,8 @@
 //! the SCM's control handler or the console's Ctrl+C handler.
 
 #[cfg(windows)]
+mod control;
+#[cfg(windows)]
 mod log;
 #[cfg(windows)]
 mod manager;
