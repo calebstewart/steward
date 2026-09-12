@@ -113,8 +113,14 @@ pub fn session() -> io::Result<u32> {
 }
 
 /// `\\.\pipe\steward-<user SID>-<session>`: this user's manager in this
-/// process's session.
+/// process's session. `STEWARD_PIPE` names another, for a second manager
+/// beside the one that runs -- `steward --console` in scratch directories --
+/// and the `stewctl` that talks to it; the server is still checked to be the
+/// user's.
 pub fn name() -> io::Result<String> {
+    if let Some(name) = std::env::var_os("STEWARD_PIPE") {
+        return Ok(format!(r"\\.\pipe\{}", name.to_string_lossy()));
+    }
     Ok(format!(r"\\.\pipe\steward-{}-{}", user_sid()?, session()?))
 }
 

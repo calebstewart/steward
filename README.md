@@ -77,7 +77,9 @@ runs the manager in the foreground until Ctrl+C, which stops every service
 manager runs per session. To try it without touching your own directories, point
 `APPDATA` and `LOCALAPPDATA` at scratch directories in that console first: the
 unit directory, logs and state follow them (the services still get your real
-environment).
+environment). Beside a manager that already runs in the session, also set
+`STEWARD_PIPE` to a name of your own, for it and for the `stewctl` that talks
+to it.
 
 ## Installing it with winpkgs
 
