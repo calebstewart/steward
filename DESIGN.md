@@ -244,18 +244,31 @@ template.
 A named pipe, `\\.\pipe\steward-<user SID>-<session>`, whose DACL admits
 only the user and which refuses remote clients; `stewctl` talks to the
 manager of the session it runs in. The manager creates its single instance
-with `FILE_FLAG_FIRST_PIPE_INSTANCE` and reuses it client after client, so the
-name is never free to take; `stewctl` opens it at `SecurityIdentification`
-and checks that the process serving it runs as the user before sending
-anything. One request and one response, each a line of JSON
-(`steward-ipc`). A thread serves the pipe and hands each request to the
-manager's loop, so the manager's state stays on one thread.
+with `FILE_FLAG_FIRST_PIPE_INSTANCE`, owned by the user in so many words, and
+reuses it client after client, so the name is never free to take; `stewctl`
+opens it at `SecurityIdentification` and, before sending anything, reads the
+pipe's owner and checks that it is the user. The owner comes from the
+creator's token and a standard user can make nobody else the owner of what
+they create, where a process ID (the first design) is reused, and another
+user's process cannot be opened to ask whose it is. One request and one
+response, each a line of JSON (`steward-ipc`). A thread serves the pipe and
+hands each request to the manager's loop, so the manager's state stays on
+one thread.
 
 The pipe is also the manager's lock: a second manager in the same session
 cannot create it and does not start (a `--console` manager while the
 per-user service runs, say). Pipe names are machine-wide, so another account
-could take the name first and keep steward from starting; not a concern on a
-single-user machine, noted for others.
+could take the name first. A manager that finds the name taken connects and
+runs the client's owner check: the user's own pipe means another manager of
+theirs, and it exits; anyone else's, or one it cannot open, it logs and tries
+again with a growing delay (up to a minute) until the name is free or it is
+told to stop. It does not exit, because the SCM starts a manager once per
+sign-in and its failure actions apply to crashes, not to stops (winpkgs does
+not set `SERVICE_CONFIG_FAILURE_ACTIONS_FLAG`); a clean exit would leave the
+session without a manager for as long as the squatter stayed. A manager that
+cannot serve the pipe for another reason -- an invalid `STEWARD_PIPE`, which
+must be a single name -- stops with a service-specific exit code, for the
+record.
 
 The verbs follow `systemctl`: `list-units` (the default), `list-timers`,
 `status [unit...]`, `start`, `stop`, `restart` (waiting for the units to

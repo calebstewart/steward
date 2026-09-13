@@ -22,7 +22,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::io::Write;
 use std::os::windows::io::OwnedHandle;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -40,7 +40,7 @@ use windows_sys::Win32::System::SystemServices::{
     JOB_OBJECT_MSG_EXIT_PROCESS, JOB_OBJECT_MSG_NEW_PROCESS,
 };
 
-use crate::control;
+use crate::control::{self, Refusal};
 use crate::log::{error, info, warning};
 use crate::state::{
     self, from_millis, to_millis, RestState, Saved, SavedProcess, SavedRest, SavedTimer, SavedUnit,
@@ -209,18 +209,32 @@ struct Manager {
     next_elapse: Option<SystemTime>,
 }
 
+/// How a manager ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ending {
+    /// It was told to stop or to detach, running or still waiting for the
+    /// pipe.
+    Stopped,
+    /// It did not run: another manager of this user serves the session.
+    Yielded,
+    /// It did not run: the control pipe cannot be served.
+    Failed,
+}
+
+/// The longest wait between attempts to create a pipe someone else holds.
+const PIPE_RETRY_MAX: Duration = Duration::from_secs(60);
+
 /// Run the manager until it is told to stop or detach. `controls` is the
 /// sending end of `inbox`, for the control plane.
-pub fn run(port: Port, controls: Sender<Control>, inbox: Receiver<Control>) {
+pub fn run(port: Port, controls: Sender<Control>, inbox: Receiver<Control>) -> Ending {
     let session = sys::own_session();
     info!(
         "steward {} starting in session {session}",
         env!("CARGO_PKG_VERSION")
     );
     // The pipe is also the lock: one manager per session.
-    if let Err(e) = control::listen(controls, port.waker()) {
-        error!("cannot serve the control pipe: {e}; not starting");
-        return;
+    if let Err(ending) = serve_pipe(&controls, &port, &inbox) {
+        return ending;
     }
     let logon = clock::logon_time(session);
     let mut manager = Manager {
@@ -257,6 +271,61 @@ pub fn run(port: Port, controls: Sender<Control>, inbox: Receiver<Control>) {
     manager.watch_taskbar_created();
     manager.check_shell();
     manager.run();
+    Ending::Stopped
+}
+
+/// Create the pipe and serve it. A name held by another manager of this
+/// user's is theirs to keep; one held by anyone else is waited out, trying
+/// again with a growing delay until it is free or a control says to stop.
+/// The SCM starts a manager once per sign-in and does not retry a clean
+/// stop, so a manager that gave up would leave the session without one for
+/// as long as the squatter cared to stay.
+fn serve_pipe(
+    controls: &Sender<Control>,
+    port: &Port,
+    inbox: &Receiver<Control>,
+) -> Result<(), Ending> {
+    let mut delay = Duration::from_secs(1);
+    let mut attempts = 0u32;
+    loop {
+        let why = match control::listen(controls.clone(), port.waker()) {
+            Ok(()) => return Ok(()),
+            Err(Refusal::Held) => {
+                info!("another steward serves this session already; not starting");
+                return Err(Ending::Yielded);
+            }
+            Err(Refusal::Failed(e)) => {
+                error!("cannot serve the control pipe: {e}; not starting");
+                return Err(Ending::Failed);
+            }
+            Err(Refusal::Taken(why)) => why,
+        };
+        attempts += 1;
+        // Every attempt while the delay grows, then one in ten: a name held
+        // for good would otherwise fill the log.
+        if delay < PIPE_RETRY_MAX || attempts.is_multiple_of(10) {
+            error!(
+                "cannot create the control pipe: {why}; trying again in {} s",
+                delay.as_secs()
+            );
+        }
+        let until = Instant::now() + delay;
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            match inbox.recv_timeout(left) {
+                Ok(Control::StopAll(reason)) | Ok(Control::Detach(reason)) => {
+                    info!("{reason}: giving up on the control pipe");
+                    return Err(Ending::Stopped);
+                }
+                Ok(Control::Note(note)) => info!("{note}"),
+                Ok(Control::Request(_, reply)) => {
+                    let _ = reply.send(Response::error("steward has no control pipe yet"));
+                }
+                Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        delay = (delay * 2).min(PIPE_RETRY_MAX);
+    }
 }
 
 impl Manager {
@@ -1685,7 +1754,8 @@ unsafe extern "system" fn on_console_ctrl(_ctrl_type: u32) -> BOOL {
 }
 
 /// `steward --console`: the same manager, in the foreground. Ctrl+C stops
-/// every service and exits; a second Ctrl+C exits leaving them running.
+/// every service and exits; a second Ctrl+C exits leaving them running. The
+/// exit code is 1 if the manager never ran.
 pub fn run_console() {
     crate::log::init(true);
     let port = match Port::new() {
@@ -1698,5 +1768,7 @@ pub fn run_console() {
     let (controls, inbox) = mpsc::channel();
     let _ = CONSOLE.set((controls.clone(), port.waker()));
     unsafe { SetConsoleCtrlHandler(Some(on_console_ctrl), 1) };
-    run(port, controls, inbox);
+    if run(port, controls, inbox) != Ending::Stopped {
+        std::process::exit(1);
+    }
 }

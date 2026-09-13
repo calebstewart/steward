@@ -193,7 +193,7 @@ locations in that console first:
 | --- | --- |
 | `APPDATA` | The unit directory, `%APPDATA%\steward\units`. |
 | `LOCALAPPDATA` | Logs, the state file and timer stamps, under `%LOCALAPPDATA%\steward`. |
-| `STEWARD_PIPE` | The control pipe's name. Set it for the manager and for the `stewctl` that talks to it. |
+| `STEWARD_PIPE` | The control pipe's name: a single name, with no `\` or `/` in it. Set it for the manager and for the `stewctl` that talks to it. |
 
 The services themselves still get your real environment: each is started with
 an environment built fresh from your account, not the manager's.

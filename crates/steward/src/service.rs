@@ -23,7 +23,7 @@ use windows_service::service_control_handler::{
 use windows_service::{define_windows_service, service_dispatcher};
 
 use crate::log::{error, info};
-use crate::manager::{self, Control, KEY_WAKE};
+use crate::manager::{self, Control, Ending, KEY_WAKE};
 use crate::sys::port::Port;
 
 // Ignored for an own-process service, but it may not be empty.
@@ -40,6 +40,10 @@ pub const CONTROL_HAND_OVER: u32 = 128;
 /// How long the SCM is told a stop may take before it counts as hung: the
 /// default `TimeoutStopSec=` and the kill that follows, with room to spare.
 const STOP_WAIT_HINT: Duration = Duration::from_secs(30);
+
+/// The service-specific exit code of a manager that could not serve its
+/// control pipe, and so never ran.
+const EXIT_NO_PIPE: u32 = 1;
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -108,11 +112,19 @@ fn host(name: &str) -> windows_service::Result<()> {
     *reporter.lock().unwrap_or_else(|p| p.into_inner()) = Some(status);
     info!("running as the SCM service {name}, session {session}");
 
-    manager::run(port, for_manager, inbox);
+    let ending = manager::run(port, for_manager, inbox);
 
+    // A manager that could not serve the pipe stops with an error, for the
+    // record: the failure actions fire on a crash, not on a stop, so a
+    // squatted name is waited out inside `run` rather than left to them.
+    let exit_code = match ending {
+        Ending::Stopped | Ending::Yielded => ServiceExitCode::NO_ERROR,
+        Ending::Failed => ServiceExitCode::ServiceSpecific(EXIT_NO_PIPE),
+    };
     status.set_service_status(ServiceStatus {
         current_state: ServiceState::Stopped,
         controls_accepted: ServiceControlAccept::empty(),
+        exit_code,
         ..running()
     })?;
     Ok(())
