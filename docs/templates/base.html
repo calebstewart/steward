@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="{{ config.default_language }}">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}{{ config.title }}{% endblock %}</title>
+    <meta
+      name="description"
+      content="{% block description %}{{ config.description }}{% endblock %}"
+    />
+    <link rel="icon" href="{{ get_url(path='favicon.svg') }}" type="image/svg+xml" />
+
+    {# Zola names the generated syntax stylesheets after its highlighter, and
+       puts BOTH the light and the dark class on every span. So both files are
+       loaded and the dark one is gated on `prefers-color-scheme`; that query,
+       not the markup, is what picks a palette. The light one carries no
+       `media`, so it is also what a browser with no preference gets. #}
+    <link rel="stylesheet" href="{{ get_url(path='giallo-light.css') }}" />
+    <link
+      rel="stylesheet"
+      href="{{ get_url(path='giallo-dark.css') }}"
+      media="(prefers-color-scheme: dark)"
+    />
+    <link rel="stylesheet" href="{{ get_url(path='style.css') }}" />
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Skip to content</a>
+
+    {% set index = get_section(path="_index.md") %}
+    <div class="layout">
+      {# `current_url` is a Zola global set on every template, which is what
+         keeps this nav out of the page/section distinction: the overview is a
+         section and the rest are pages, but both compare the same way. #}
+      <nav class="sidebar" aria-label="Documentation">
+        <a class="brand" href="{{ index.permalink }}">
+          <span class="brand-name">{{ config.title }}</span>
+          <span class="brand-sub">documentation</span>
+        </a>
+
+        <ul class="nav">
+          <li>
+            <a
+              href="{{ index.permalink }}"
+              {% if current_url == index.permalink %}class="current" aria-current="page"{% endif %}
+            >{{ index.title }}</a>
+          </li>
+          {% for p in index.pages %}
+            <li>
+              <a
+                href="{{ p.permalink }}"
+                {% if current_url == p.permalink %}class="current" aria-current="page"{% endif %}
+              >{{ p.title }}</a>
+            </li>
+          {% endfor %}
+        </ul>
+
+        {% block toc %}{% endblock %}
+
+        <ul class="nav-external">
+          <li><a href="{{ config.extra.repository }}">Source &amp; issues</a></li>
+          <li><a href="{{ config.extra.repository }}/blob/main/DESIGN.md">Design notes</a></li>
+          <li><a href="{{ config.extra.author_site }}">calebstew.art</a></li>
+        </ul>
+      </nav>
+
+      <main id="content">
+        {% block content %}{% endblock %}
+
+        <footer>
+          <p>
+            MIT licensed. <a href="{{ config.extra.repository }}">Source on GitHub</a>.
+          </p>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>

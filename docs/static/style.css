@@ -1,0 +1,528 @@
+/* --------------------------------------------------------------------------
+   Palette, shared with calebstew.art so the docs read as part of the same
+   site. Light values live on :root so every colour has a definition outside a
+   media query; the dark block only swaps the tokens.
+   -------------------------------------------------------------------------- */
+:root {
+  --bg: #fbfbfa;
+  --surface: #ffffff;
+  --border: #e3e1dc;
+  --text: #201f1c;
+  --muted: #6b6862;
+  --accent: #9a5b2e;
+  --code-bg: #f4f2ee;
+  --warn: #8a5a00;
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, Roboto,
+    "Helvetica Neue", sans-serif;
+  --font-mono:
+    ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  --measure: 44rem;
+  --sidebar: 14rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16151a;
+    --surface: #1d1c22;
+    --border: #302e37;
+    --text: #e8e6e1;
+    --muted: #9b968e;
+    --accent: #d9a066;
+    --code-bg: #1d1c22;
+    --warn: #e6b95c;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* Headings are link targets from the sidebar; without this the browser puts
+     them flush against the top edge of the viewport. */
+  scroll-padding-top: 1.5rem;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* -------------------------------------------------------------------- Layout */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2.5rem;
+  max-width: calc(var(--sidebar) + var(--measure) + 8rem);
+  margin: 0 auto;
+  padding: clamp(2rem, 6vh, 4rem) 1.5rem;
+}
+
+/* Two columns only when there is room for the measure beside the nav; below
+   that the nav is a header the page starts under. */
+@media (min-width: 58rem) {
+  .layout {
+    grid-template-columns: var(--sidebar) minmax(0, var(--measure));
+    gap: 4rem;
+  }
+
+  .sidebar {
+    position: sticky;
+    top: clamp(2rem, 6vh, 4rem);
+    align-self: start;
+    max-height: calc(100vh - 6rem);
+    overflow-y: auto;
+  }
+}
+
+main {
+  min-width: 0;
+}
+
+/* ------------------------------------------------------------------- Sidebar */
+.brand {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
+.brand-name {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.brand-sub {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+
+.brand:hover .brand-name,
+.brand:focus-visible .brand-name {
+  color: var(--accent);
+}
+
+.nav,
+.toc,
+.nav-external {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nav {
+  margin-top: 2rem;
+}
+
+.nav > li > a {
+  display: block;
+  padding: 0.3rem 0.6rem;
+  margin-left: -0.6rem;
+  border-radius: 6px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.95rem;
+  transition:
+    color 120ms ease,
+    background-color 120ms ease;
+}
+
+.nav > li > a:hover,
+.nav > li > a:focus-visible {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.nav > li > a.current {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.toc-wrap {
+  margin-top: 1.75rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+}
+
+.nav-label {
+  display: block;
+  margin-bottom: 0.6rem;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+
+.toc a {
+  display: block;
+  padding: 0.2rem 0;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.toc a:hover,
+.toc a:focus-visible {
+  color: var(--accent);
+}
+
+.nav-external {
+  margin-top: 2rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+}
+
+.nav-external a {
+  display: block;
+  padding: 0.15rem 0;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.nav-external a:hover,
+.nav-external a:focus-visible {
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------- Page head */
+.page-head h1 {
+  margin: 0;
+  font-size: clamp(1.8rem, 5vw, 2.3rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.page-head .tagline {
+  margin: 0.6rem 0 0;
+  color: var(--muted);
+  text-wrap: balance;
+}
+
+/* -------------------------------------------------------------------- Prose */
+.prose {
+  margin-top: 2.5rem;
+}
+
+.prose > *:first-child {
+  margin-top: 0;
+}
+
+.prose p,
+.prose ul,
+.prose ol {
+  margin: 0 0 1.1rem;
+}
+
+.prose h2,
+.prose h3 {
+  scroll-margin-top: 1.5rem;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+
+.prose h2 {
+  margin: 2.75rem 0 1rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.prose h3 {
+  margin: 2rem 0 0.75rem;
+  font-size: 1.02rem;
+  font-weight: 600;
+}
+
+.prose a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  transition: border-color 120ms ease;
+}
+
+.prose a:hover,
+.prose a:focus-visible {
+  border-bottom-color: currentColor;
+}
+
+.prose ul,
+.prose ol {
+  padding-left: 1.2rem;
+}
+
+.prose li {
+  margin-bottom: 0.35rem;
+}
+
+.prose li > ul,
+.prose li > ol {
+  margin: 0.35rem 0 0.6rem;
+}
+
+.prose strong {
+  font-weight: 600;
+}
+
+/* The anchor a heading carries. Present but quiet: it only shows once the
+   heading is hovered or the link itself is focused by keyboard. */
+.anchor {
+  margin-left: 0.4rem;
+  color: var(--muted);
+  text-decoration: none;
+  border: 0;
+  font-weight: 400;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.prose h2:hover .anchor,
+.prose h3:hover .anchor,
+.anchor:focus-visible {
+  opacity: 1;
+}
+
+/* --------------------------------------------------------------------- Code */
+.prose code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1em 0.32em;
+  overflow-wrap: anywhere;
+}
+
+.prose pre {
+  margin: 0 0 1.3rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  /* Zola's generated syntax stylesheets set the colours; the frame is ours. */
+  background: var(--code-bg);
+}
+
+.prose pre code {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-size: inherit;
+}
+
+/* ------------------------------------------------------------------- Tables */
+/* `display: block` is what makes a wide table scroll inside its own box
+   instead of widening the page. The option tables are wider than the measure
+   on a phone, and horizontal page scroll is worse than a scrollbar here. */
+.prose table {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0 0 1.3rem;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.prose th,
+.prose td {
+  padding: 0.5rem 0.9rem 0.5rem 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+}
+
+.prose th {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.prose td code {
+  white-space: nowrap;
+}
+
+.prose blockquote {
+  margin: 0 0 1.3rem;
+  padding-left: 1rem;
+  border-left: 2px solid var(--border);
+  color: var(--muted);
+}
+
+.prose hr {
+  margin: 2.5rem 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+/* ------------------------------------------------------------------- Footer */
+main > footer {
+  margin-top: 4rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+main > footer p {
+  margin: 0;
+}
+
+main > footer a {
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+
+main > footer a:hover,
+main > footer a:focus-visible {
+  color: var(--accent);
+  border-bottom-color: currentColor;
+}
+
+/* ------------------------------------------------------------------- Alerts */
+/* `> [!NOTE]` and `> [!WARNING]` blocks, which Zola renders as a blockquote
+   carrying a `markdown-alert-*` class and no label of its own -- hence the
+   ::before. The selectors are two classes deep so they beat the plain
+   blockquote rule above. Each kind only sets its tone and its label. */
+.prose .markdown-alert-note {
+  --tone: var(--accent);
+  --label: "Note";
+}
+
+.prose .markdown-alert-warning {
+  --tone: var(--warn);
+  --label: "Warning";
+}
+
+.prose .markdown-alert-note,
+.prose .markdown-alert-warning {
+  margin: 0 0 1.6rem;
+  padding: 0.9rem 1.1rem;
+  border: 1px solid color-mix(in srgb, var(--tone) 30%, var(--border));
+  border-left: 3px solid var(--tone);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--tone) 7%, transparent);
+  color: var(--text);
+}
+
+.prose .markdown-alert-note::before,
+.prose .markdown-alert-warning::before {
+  content: var(--label);
+  display: block;
+  margin-bottom: 0.4rem;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--tone);
+}
+
+.prose .markdown-alert-note p,
+.prose .markdown-alert-warning p {
+  margin: 0;
+}
+
+.prose .markdown-alert-note p + p,
+.prose .markdown-alert-warning p + p {
+  margin-top: 0.7rem;
+}
+
+/* -------------------------------------------------------------- Narrow */
+/* Below the two-column breakpoint the sidebar becomes a header, so it has to
+   be short: a full nav plus a table of contents would push the h1 off the
+   first screen. The nav goes horizontal, and the TOC is dropped outright --
+   it lists headings that are a screen away rather than a column away. */
+@media (max-width: 57.99rem) {
+  .sidebar {
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.75rem;
+    margin-top: 1.25rem;
+  }
+
+  .nav > li > a {
+    margin-left: 0;
+    padding: 0.25rem 0.5rem;
+  }
+
+  .toc-wrap {
+    display: none;
+  }
+
+  .nav-external {
+    display: flex;
+    gap: 1.25rem;
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+  }
+
+  .prose {
+    margin-top: 2rem;
+  }
+}
+
+/* --------------------------------------------------------------------- A11y */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  padding: 0.6rem 1rem;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 0 0 6px 0;
+  z-index: 10;
+}
+
+.skip-link:focus {
+  left: 0;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}

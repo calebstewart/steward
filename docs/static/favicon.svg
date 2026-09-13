@@ -1,0 +1,18 @@
+<!--
+  A service, and the arrow that brings it back: steward's whole job is that a
+  daemon comes back. In the site's accent colour; `currentColor` plus a media
+  query is what lets one file serve both schemes, since a favicon gets no
+  stylesheet of its own. (No double hyphens in here: XML forbids them in a
+  comment, and the whole file then fails to parse.)
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"
+     fill="none" stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round">
+  <style>
+    svg { color: #9a5b2e; }
+    @media (prefers-color-scheme: dark) { svg { color: #d9a066; } }
+  </style>
+  <path d="M20 12a8 8 0 1 1-2.34-5.66"/>
+  <path d="M17.66 2.34v4h-4"/>
+  <circle cx="12" cy="12" r="2.25" fill="currentColor" stroke="none"/>
+</svg>

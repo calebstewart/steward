@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block toc %}
+  {% set toc_entries = section.toc %}
+  {% include "toc.html" %}
+{% endblock %}
+
+{% block content %}
+  <header class="page-head">
+    {# The section is titled "Overview" so the nav reads well; the landing
+       page's own heading is the project. #}
+    <h1>{{ config.title }}</h1>
+    <p class="tagline">{{ config.extra.tagline }}</p>
+  </header>
+
+  <div class="prose">{{ section.content | safe }}</div>
+{% endblock %}

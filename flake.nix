@@ -25,11 +25,15 @@
         "aarch64-linux"
       ];
       forAllSystems = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      # The documentation site, built for the build machine rather than for
+      # Windows. Not in the overlay: nobody installs a website.
+      mkDocs = pkgs: pkgs.callPackage ./nix/docs.nix { };
     in
     {
       packages = forAllSystems (pkgs: {
         steward = pkgs.pkgsCross.mingwW64.callPackage ./nix/package.nix { };
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.steward;
+        docs = mkDocs pkgs;
       });
 
       # For a package set that already targets Windows, such as `pkgs` inside a
@@ -51,6 +55,9 @@
         {
           unit = pkgs.callPackage ./nix/unit-tests.nix { };
           windows = self.packages.${pkgs.stdenv.hostPlatform.system}.steward;
+          # A broken template or a dead `@/` link fails the build, so the site
+          # cannot go stale unnoticed.
+          docs = mkDocs pkgs;
         }
         // import ./nix/winpkgs/checks.nix {
           inherit pkgs self winpkgs;
