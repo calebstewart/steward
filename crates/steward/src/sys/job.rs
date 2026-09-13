@@ -16,7 +16,7 @@ use std::mem::{size_of, zeroed};
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::ptr::null;
 
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, HANDLE};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectAssociateCompletionPortInformation,
     JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
@@ -99,26 +99,108 @@ impl Job {
 
     /// The IDs of the processes in the job.
     pub fn pids(&self) -> io::Result<Vec<u32>> {
+        self.pids_with_room(1024)
+    }
+
+    /// `pids`, first trying a buffer with room for `room` IDs. Windows fails
+    /// a query whose buffer is too small with `ERROR_MORE_DATA`, but reports
+    /// in it how many processes the job holds, so the buffer is regrown to
+    /// fit and the query repeated. Past a cap of a million IDs, the partial
+    /// list is returned rather than nothing: a runaway unit still gets its
+    /// processes recorded and asked to exit.
+    fn pids_with_room(&self, mut room: usize) -> io::Result<Vec<u32>> {
         // JOBOBJECT_BASIC_PROCESS_ID_LIST: two u32 counts, then usize IDs.
-        const ROOM: usize = 1024;
-        let mut buffer = vec![0usize; 1 + ROOM];
-        check(unsafe {
-            QueryInformationJobObject(
-                self.raw(),
-                JobObjectBasicProcessIdList,
-                buffer.as_mut_ptr() as *mut c_void,
-                (buffer.len() * size_of::<usize>()) as u32,
-                std::ptr::null_mut(),
-            )
-        })?;
-        let listed = unsafe { *(buffer.as_ptr() as *const u32).add(1) } as usize;
-        Ok(buffer[1..1 + listed.min(ROOM)]
-            .iter()
-            .map(|&pid| pid as u32)
-            .collect())
+        const HEADER: usize = (2 * size_of::<u32>()).div_ceil(size_of::<usize>());
+        const MOST: usize = 1 << 20;
+        loop {
+            let mut buffer = vec![0usize; HEADER + room];
+            let result = check(unsafe {
+                QueryInformationJobObject(
+                    self.raw(),
+                    JobObjectBasicProcessIdList,
+                    buffer.as_mut_ptr() as *mut c_void,
+                    (buffer.len() * size_of::<usize>()) as u32,
+                    std::ptr::null_mut(),
+                )
+            });
+            let counts = buffer.as_ptr() as *const u32;
+            let assigned = unsafe { *counts } as usize;
+            let listed = unsafe { *counts.add(1) } as usize;
+            match result {
+                Ok(()) => {}
+                Err(e) if e.raw_os_error() == Some(ERROR_MORE_DATA as i32) => {
+                    if room < MOST {
+                        // Double past what was there: the job may still be
+                        // growing, and each query is a fresh snapshot.
+                        room = assigned.max(room).saturating_mul(2).min(MOST);
+                        continue;
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+            return Ok(buffer[HEADER..HEADER + listed.min(room)]
+                .iter()
+                .map(|&pid| pid as u32)
+                .collect());
+        }
     }
 
     pub fn terminate(&self, exit_code: u32) -> io::Result<()> {
         check(unsafe { TerminateJobObject(self.raw(), exit_code) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::{Child, Command, Stdio};
+
+    use super::*;
+
+    /// Processes that sit until the job is terminated: `pause` reads from
+    /// a pipe nobody writes to.
+    fn sitters(job: &Job, count: usize) -> Vec<Child> {
+        (0..count)
+            .map(|_| {
+                let child = Command::new("cmd")
+                    .args(["/c", "pause"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap();
+                job.assign(child.as_raw_handle()).unwrap();
+                child
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lists_more_processes_than_the_first_buffer_holds() {
+        let job = Job::create(false).unwrap();
+        let mut children = sitters(&job, 5);
+        let mut expected: Vec<u32> = children.iter().map(|c| c.id()).collect();
+        expected.sort_unstable();
+
+        // Room for one ID, so the first query fails with ERROR_MORE_DATA.
+        let mut pids = job.pids_with_room(1).unwrap();
+        pids.sort_unstable();
+        assert_eq!(pids, expected);
+
+        let mut pids = job.pids().unwrap();
+        pids.sort_unstable();
+        assert_eq!(pids, expected);
+
+        job.terminate(0).unwrap();
+        for child in &mut children {
+            child.wait().unwrap();
+        }
+    }
+
+    #[test]
+    fn an_empty_job_lists_nothing() {
+        let job = Job::create(false).unwrap();
+        assert!(job.pids_with_room(1).unwrap().is_empty());
+        assert!(job.pids().unwrap().is_empty());
     }
 }
