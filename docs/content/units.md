@@ -58,9 +58,10 @@ removing its file.
   written. Windows programs parse their own command lines, and systemd's word
   splitting treats `\` as an escape, which would mangle every path. Quote a
   path with spaces as you would at a prompt:
-  `ExecStart="C:\Program Files\whkd\bin\whkd.exe"`. A leading `-` (ignore
-  this command's failure) is the one prefix kept; `@`, `+`, `!` and `:` are
-  errors.
+  `ExecStart="C:\Program Files\whkd\bin\whkd.exe"`. Left unquoted, Windows
+  tries `C:\Program.exe` before the program you meant, so an unquoted path
+  with a space is a warning. A leading `-` (ignore this command's failure) is
+  the one prefix kept; `@`, `+`, `!` and `:` are errors.
 - **`%` is passed through untouched.** It is neither a systemd specifier nor
   an environment variable: `%VAR%` expansion belongs to `cmd`, not to
   `CreateProcessW`. A command that needs it can go through `cmd.exe /d /c`.

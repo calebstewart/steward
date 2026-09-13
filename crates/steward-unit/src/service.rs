@@ -598,6 +598,17 @@ impl Reader {
         } else if line.is_empty() {
             format!("{}= has a prefix but no command", e.key)
         } else {
+            if let Some((program, rest)) = unquoted_program_with_a_space(line) {
+                let first = line.split_whitespace().next().unwrap_or_default();
+                self.warn(
+                    e.line,
+                    format!(
+                        "{}= names a program whose path has a space, unquoted: Windows tries \
+                         {first}.exe first. Quote it: \"{program}\"{rest}",
+                        e.key
+                    ),
+                );
+            }
             into.push(Command {
                 line: line.to_owned(),
                 ignore_failure,
@@ -674,6 +685,32 @@ fn list(into: &mut Vec<String>, value: &str) {
     } else {
         into.extend(value.split_whitespace().map(str::to_owned));
     }
+}
+
+/// An unquoted command line whose program path has a space in it:
+/// `C:\Program Files\whkd\whkd.exe --flag`. `CreateProcessW` with no
+/// `lpApplicationName` takes the program to be the first whitespace-delimited
+/// token and, failing that, each longer prefix in turn (`C:\Program.exe`,
+/// `C:\Program Files\whkd\whkd.exe`, ...), so a stray `C:\Program.exe` runs
+/// instead. The program is taken to end at the first token with a program
+/// extension; the result is that program and the rest of the line (starting
+/// with the space that separates them, or empty).
+fn unquoted_program_with_a_space(line: &str) -> Option<(&str, &str)> {
+    fn is_program(token: &str) -> bool {
+        let lower = token.to_ascii_lowercase();
+        [".exe", ".com", ".bat", ".cmd"]
+            .iter()
+            .any(|ext| lower.ends_with(ext))
+    }
+    let first = line.split_whitespace().next()?;
+    // A quoted program, a bare name found on PATH, or a path that already
+    // names the program: none of these misroute.
+    if first.starts_with('"') || !first.contains(['\\', '/']) || is_program(first) {
+        return None;
+    }
+    let end = line.split_whitespace().skip(1).find(|t| is_program(t))?;
+    let offset = end.as_ptr() as usize - line.as_ptr() as usize + end.len();
+    Some(line.split_at(offset))
 }
 
 /// Words separated by whitespace; `"` or `'` group, and are removed.
@@ -840,6 +877,49 @@ WantedBy=graphical-session.target
                 ignore_failure: true
             }]
         );
+    }
+
+    #[test]
+    fn an_unquoted_program_path_with_a_space_warns() {
+        assert_eq!(
+            messages("[Service]\nExecStart=C:\\Program Files\\whkd\\whkd.exe --flag\n"),
+            [
+                "line 2: warning: ExecStart= names a program whose path has a space, unquoted: \
+                 Windows tries C:\\Program.exe first. Quote it: \"C:\\Program Files\\whkd\\whkd.exe\" --flag"
+            ]
+        );
+        // The key is named and the prefix is not part of it; a program ends
+        // at its extension, whatever the case, with or without arguments.
+        assert_eq!(
+            messages("[Service]\nExecStart=x\nExecStop=-%LOCALAPPDATA%/Programs/My App/app.CMD\n"),
+            [
+                "line 3: warning: ExecStop= names a program whose path has a space, unquoted: \
+                 Windows tries %LOCALAPPDATA%/Programs/My.exe first. \
+                 Quote it: \"%LOCALAPPDATA%/Programs/My App/app.CMD\""
+            ]
+        );
+        // The command still loads, as written.
+        let s = ok("[Service]\nExecStart=C:\\Program Files\\a b\\c.exe d\n");
+        assert_eq!(s.exec_start[0].line, r"C:\Program Files\a b\c.exe d");
+    }
+
+    #[test]
+    fn programs_that_do_not_misroute_are_quiet() {
+        for line in [
+            r#""C:\Program Files\whkd\bin\whkd.exe" --flag"#,
+            r"C:\tools\whkd.exe --flag",
+            r"C:\tools\whkd --flag",
+            "komorebic stop",
+            "whkd.exe",
+            r"restic backup C:\Users\alice\My Documents",
+            r"python C:\my scripts\build.cmd",
+            r#"cmd.exe /d /c "C:\Program Files\x\y.exe""#,
+        ] {
+            assert!(
+                messages(&format!("[Service]\nExecStart={line}\n")).is_empty(),
+                "{line}"
+            );
+        }
     }
 
     #[test]
