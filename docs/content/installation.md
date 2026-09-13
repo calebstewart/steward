@@ -88,7 +88,10 @@ systemd.user.services.whkd = {
 
 The template is registered to start automatically, with failure actions that
 restart a manager 5 s after it dies, up to three times; the count resets after
-a minute without a failure. The first manager
+a minute without a failure. Its security descriptor keeps user-defined
+controls to administrators: Windows' default would let any other user signed
+in to the machine send your manager the hand-over control (below) and leave
+your session without one until your next sign-in. The first manager
 starts at your **next sign-in**: registering a template does not start it in a
 session that is already signed in.
 
@@ -137,11 +140,18 @@ copy steward.exe "C:\Program Files\steward"
 copy stewctl.exe "C:\Program Files\steward"
 sc create steward type= userown start= auto binPath= "\"C:\Program Files\steward\steward.exe\""
 sc failure steward reset= 60 actions= restart/5000/restart/5000/restart/5000
+sc sdset steward D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;IU)(A;;CCLCSWLORC;;;SU)
 ```
 
 The space after each `=` is part of `sc`'s syntax. From PowerShell, spell it
-`sc.exe`: plain `sc` is an alias for `Set-Content` there. Add the directory to
-your `PATH` for `stewctl`.
+`sc.exe`, and quote the descriptor: plain `sc` is an alias for `Set-Content`
+there. Add the directory to your `PATH` for `stewctl`.
+
+The `sc sdset` line is Windows' default descriptor for a service with one
+right taken from interactive users and services: sending user-defined
+controls. Without it, any other user signed in to the machine could send your
+manager the hand-over control (see "Upgrading") and leave your session
+without a manager until your next sign-in. Administrators keep the right.
 
 Windows starts an instance named `steward_<suffix>` at every sign-in — so
 **sign out and back in**. The suffix changes at each sign-in; nothing needs to

@@ -178,7 +178,13 @@ copy steward.exe "C:\Program Files\steward"
 copy stewctl.exe "C:\Program Files\steward"
 sc create steward type= userown start= auto binPath= "\"C:\Program Files\steward\steward.exe\""
 sc failure steward reset= 60 actions= restart/5000/restart/5000/restart/5000
+sc sdset steward D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;IU)(A;;CCLCSWLORC;;;SU)
 ```
+
+The last line is Windows' default descriptor for a service minus one right
+for interactive users: sending user-defined controls, which would let any
+other user signed in to the machine send your manager the hand-over control
+below and leave your session without one until your next sign-in.
 
 Windows starts an instance, `steward_<suffix>`, at every sign-in, so sign out
 and in. Anything a unit now runs should no longer be started by a Run key or

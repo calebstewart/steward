@@ -32,9 +32,18 @@ const DISPATCH_NAME: &str = "steward";
 /// The user-defined control that asks the manager to hand over to a new one:
 /// detach, leaving every service running, and stop. What an upgrade sends in
 /// place of Stop (winpkgs: `windows.services.<name>.restartControl`); the next
-/// manager adopts the services. Interactive users may send user-defined
-/// controls, so anyone signed in can make a manager step aside -- which stops
-/// nothing, and the next sign-in starts a manager again.
+/// manager adopts the services.
+///
+/// Who may send it is the template's security descriptor's to say, and it
+/// matters: a hand-over that no new manager follows leaves the session
+/// without one -- no restarts, no timers, no `stewctl` -- until its next
+/// sign-in, since a clean stop runs none of the SCM's failure actions.
+/// Windows' default descriptor lets every interactive user send a service
+/// user-defined controls, so any other account signed in to the machine could
+/// do that to this session. The template steward is registered with withholds
+/// the right from interactive users (`nix/winpkgs/system.nix`; `sc sdset` in
+/// the by-hand install), leaving it to administrators and SYSTEM, which an
+/// upgrade runs as.
 pub const CONTROL_HAND_OVER: u32 = 128;
 
 /// How long the SCM is told a stop may take before it counts as hung: the

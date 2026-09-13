@@ -72,6 +72,15 @@ in
       # A new build is a new manager, handed the services by the old one.
       restartTriggers = [ cfg.package ];
       restartControl = 128;
+      # Windows' default descriptor lets any interactive user send a service
+      # user-defined controls, so anyone signed in to the machine -- at the
+      # console or over Remote Desktop -- could send another session's
+      # manager control 128 and leave that session without one until its next
+      # sign-in: a clean stop runs no failure action. The default without
+      # that right (CR) for interactive users (IU) and services (SU);
+      # administrators and SYSTEM keep it, and an upgrade sends the control
+      # elevated. Instances copy it at sign-in.
+      securityDescriptor = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;IU)(A;;CCLCSWLORC;;;SU)";
     };
   };
 }

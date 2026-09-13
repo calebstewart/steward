@@ -93,12 +93,15 @@ a sign-out/sign-in, a crash, and a lock/unlock.
 | Timing | Starts about 120 ms after `explorer.exe`, before Explorer has created the desktop window (13 top-level windows at start, 330 later). |
 | Environment | Built from the registry: the user's PATH (winpkgs' bin directory included), 45 variables, nothing from whoever registered the service. Working directory `C:\WINDOWS\system32`. |
 | Crash | The template's failure actions are copied to the instance. An abrupt exit was followed by a new process 5.003 s later. |
-| Rights | Interactive users may query the instance and send it user-defined controls (128-255), but not start or stop it (`sc sdshow`: `CCLCSWLOCRRC` for IU). `CDPUserSvc_*` is the same. |
+| Rights | With Windows' default descriptor, interactive users may query the instance and send it user-defined controls (128-255), but not start or stop it (`sc sdshow`: `CCLCSWLOCRRC` for IU; `CDPUserSvc_*` is the same). So any other account signed in to the machine could send a session's manager the hand-over control and leave it unsupervised until its next sign-in (#11); the template is registered without that right for interactive users, see "Consequences". |
 | Session events | `SERVICE_CONTROL_SESSIONCHANGE` arrives for lock and unlock. |
 | Sign-out | A plain `SERVICE_CONTROL_STOP`, about 180 ms before Winlogon logs the session off, and no logoff session change before it (observed with steward itself, 2026-09-12). The session's processes outlive the Stop by seconds: a service steward left running was still alive 10 s later. Stopping every service on that Stop works: `ping` was stopped in order in 16 ms, and the next session's manager started it afresh. |
 
 Not yet observed: how long an instance has at sign-out before its session's
-processes are ended.
+processes are ended; and that an instance created after the template's
+descriptor was changed carries the new one, as it carries the rest of the
+template (the instance on the machine this was written on matched its
+template, but both had the default).
 
 ### Consequences
 
@@ -125,6 +128,22 @@ processes are ended.
   system configuration (install, upgrade), the services' lifecycle to the
   user. (Granting interactive users start/stop on the template is possible
   with `sc sdset`; not done unless a need appears.)
+- **Only administrators may send the hand-over.** The default descriptor
+  lets any interactive user send an instance user-defined controls, so any
+  other account signed in to the machine -- at the console or over Remote
+  Desktop -- could send another session's manager control 128 and leave that
+  session without restarts, timers or `stewctl` until its next sign-in: a
+  clean stop runs no failure action, so nothing brings a manager back (#11).
+  The template is registered with the default descriptor minus that right
+  (`CR`) for interactive users and services (`IU`, `SU`) -- winpkgs'
+  `windows.services.<name>.securityDescriptor`, or `sc sdset` by hand.
+  Administrators and SYSTEM keep it, and an upgrade sends the control
+  elevated. Instances copy the descriptor at sign-in with the rest of the
+  template, so a template tightened after the fact reaches a signed-in user
+  at their next sign-in. The other way, making the hand-over self-healing
+  (a non-zero exit code plus `FailureActionsOnNonCrashFailures`, so the SCM
+  restarts the instance itself), was not taken: it would count every upgrade
+  as a failure and race the restart winpkgs already does.
 - **Session and power events come through the SCM.** The service control
   handler already receives lock/unlock; no hidden window or polling needed for
   the event triggers later.
@@ -178,6 +197,8 @@ processes are ended.
    detaches, leaving every service running and recorded, and stops. The
    system configuration (elevated) then starts the instance on the new
    `steward.exe`, which adopts them by layer 2; the services never notice.
+   Only administrators and SYSTEM may send the control (see "Consequences"):
+   a hand-over nothing follows would leave the session without a manager.
    winpkgs sends it through `windows.services.<name>.restartControl`, in
    place of the Stop with which it restarts a changed service. A service's
    own binary can be replaced by stopping the unit first -- which fixes
