@@ -105,7 +105,9 @@ pub fn restart_delay(service: &Service, step: u32) -> Duration {
         let ratio = max.as_secs_f64() / base.as_secs_f64();
         base.as_secs_f64() * ratio.powf(fraction)
     };
-    Duration::from_secs_f64(seconds).min(max)
+    // `RestartMaxDelaySec=infinity` is `Duration::MAX`, whose float form
+    // rounds past what a `Duration` holds; clamp rather than panic.
+    Duration::try_from_secs_f64(seconds).unwrap_or(max).min(max)
 }
 
 /// `StartLimitBurst=` starts within `StartLimitIntervalSec=`; a burst or
@@ -212,6 +214,20 @@ mod tests {
         let zero = service("RestartSec=0\nRestartSteps=2\nRestartMaxDelaySec=10s\n");
         assert_eq!(restart_delay(&zero, 0), Duration::ZERO);
         assert_eq!(restart_delay(&zero, 1), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn infinite_max_delay_saturates_instead_of_panicking() {
+        let s = service("RestartMaxDelaySec=infinity\n");
+        assert_eq!(restart_delay(&s, 0), Duration::from_secs(1));
+        let mut last = Duration::ZERO;
+        for n in 0..8 {
+            let delay = restart_delay(&s, n);
+            assert!(delay >= last, "step {n} shrank: {delay:?} < {last:?}");
+            last = delay;
+        }
+        assert_eq!(restart_delay(&s, 5), Duration::MAX);
+        assert_eq!(restart_delay(&s, 9), Duration::MAX);
     }
 
     #[test]
