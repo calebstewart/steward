@@ -610,17 +610,49 @@ fn closest<'a>(wanted: &str, candidates: impl IntoIterator<Item = &'a str>) -> O
         .map(|(_, candidate)| candidate)
 }
 
+/// How much of a file's end is read at a time by [`tail`].
+const TAIL_CHUNK: u64 = 64 << 10;
+
 /// The last `n` lines of a file, if it can be read.
 fn tail(path: &PathBuf, n: usize) -> Vec<String> {
-    let Ok(bytes) = std::fs::read(path) else {
+    let Ok(mut file) = std::fs::File::open(path) else {
         return Vec::new();
     };
-    let text = String::from_utf8_lossy(&bytes);
+    let Ok(len) = file.metadata().map(|m| m.len()) else {
+        return Vec::new();
+    };
+    last_lines(&mut file, len, n).unwrap_or_default()
+}
+
+/// The last `n` of the lines in the first `len` bytes of `file`, read from
+/// the end in chunks of [`TAIL_CHUNK`]: a log is not small, and a tail
+/// should read about what it prints, not all of it.
+fn last_lines(file: &mut (impl Read + Seek), len: u64, n: usize) -> std::io::Result<Vec<String>> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    // Read back until one more newline than lines wanted has been seen: the
+    // chunk boundary cuts a line, and that fragment is not one of the last
+    // `n` once `n` whole lines follow it. Reaching the start ends it too.
+    let mut held = Vec::new();
+    let mut end = len;
+    let mut newlines = 0;
+    while end > 0 && newlines <= n {
+        let start = end.saturating_sub(TAIL_CHUNK);
+        let mut chunk = vec![0; (end - start) as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut chunk)?;
+        newlines += chunk.iter().filter(|&&b| b == b'\n').count();
+        chunk.extend_from_slice(&held);
+        held = chunk;
+        end = start;
+    }
+    let text = String::from_utf8_lossy(&held);
     let lines: Vec<&str> = text.lines().collect();
-    lines[lines.len().saturating_sub(n)..]
+    Ok(lines[lines.len().saturating_sub(n)..]
         .iter()
         .map(|l| l.to_string())
-        .collect()
+        .collect())
 }
 
 fn logs(unit: &str, lines: usize, follow: bool) -> Outcome {
@@ -661,7 +693,11 @@ fn logs(unit: &str, lines: usize, follow: bool) -> Outcome {
     if !follow {
         return Ok(ExitCode::SUCCESS);
     }
-    let mut offset = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    // Through a handle: the size a path's metadata gives is the directory's
+    // idea of it, stale while the unit's processes hold the file open.
+    let mut offset = std::fs::File::open(&path)
+        .and_then(|f| f.metadata())
+        .map_or(0, |m| m.len());
     let stdout = std::io::stdout();
     loop {
         std::thread::sleep(Duration::from_millis(250));
@@ -779,5 +815,45 @@ mod tests {
         assert_eq!(closest("WHKD.service", units), Some("whkd.service"));
         assert_eq!(closest("flow-launcher.service", units), None);
         assert_eq!(distance("kitten", "sitting"), 3);
+    }
+
+    fn last(text: &str, n: usize) -> Vec<String> {
+        let mut file = std::io::Cursor::new(text.as_bytes().to_vec());
+        last_lines(&mut file, text.len() as u64, n).unwrap()
+    }
+
+    #[test]
+    fn a_tail_of_a_small_file() {
+        assert_eq!(last("", 3), Vec::<String>::new());
+        assert_eq!(last("a\nb\n", 0), Vec::<String>::new());
+        assert_eq!(last("a\nb\n", 3), ["a", "b"]);
+        assert_eq!(last("a\nb\nc\n", 3), ["a", "b", "c"]);
+        assert_eq!(last("a\nb\nc\nd\n", 3), ["b", "c", "d"]);
+        // The last line need not be complete, and line endings may be CRLF.
+        assert_eq!(last("a\nb\nc", 2), ["b", "c"]);
+        assert_eq!(last("a\r\nb\r\nc\r\n", 2), ["b", "c"]);
+    }
+
+    /// Lines that straddle the chunk boundaries, in a file of many chunks,
+    /// come out whole and in order, and the fragment the last chunk read
+    /// begins with is never printed.
+    #[test]
+    fn a_tail_of_a_large_file() {
+        let line = |i: usize| format!("line {i} {}", "x".repeat(i % 700));
+        let text: String = (0..2000).map(|i| line(i) + "\n").collect();
+        assert!(text.len() as u64 > 5 * TAIL_CHUNK);
+        assert_eq!(last(&text, 3), [line(1997), line(1998), line(1999)]);
+        assert_eq!(last(&text, 1), [line(1999)]);
+        let all = last(&text, 5000);
+        assert_eq!(all.len(), 2000);
+        assert_eq!(all[0], line(0));
+        // A line longer than a chunk.
+        let long = "y".repeat(3 * TAIL_CHUNK as usize);
+        let text = format!("first\n{long}\nlast\n");
+        assert_eq!(last(&text, 2), [long.as_str(), "last"]);
+        assert_eq!(last(&text, 3), ["first", long.as_str(), "last"]);
+        // Multibyte characters across a chunk boundary survive.
+        let text: String = (0..3000).map(|i| format!("€{i}£\n")).collect();
+        assert_eq!(last(&text, 2), ["€2998£", "€2999£"]);
     }
 }
