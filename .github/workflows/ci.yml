@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or PR supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The whole workspace, steward and its Windows APIs included, built and
+  # tested where it runs.
+  rust:
+    name: Rust (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+
+  # The flake's checks: the platform-free crates' tests natively, the Windows
+  # cross build, and the winpkgs modules evaluated and built as a consumer's
+  # would be. The mingw toolchain comes from cache.nixos.org, so only steward
+  # itself is built.
+  nix:
+    name: Nix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Flake check
+        # Builds this runner's checks and evaluates every system's.
+        run: nix flake check --all-systems --print-build-logs
+      - name: Format
+        # Files rather than directories: nixfmt deprecates walking them.
+        run: git ls-files -z '*.nix' | xargs -0 nix fmt -- --check
