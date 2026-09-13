@@ -49,9 +49,12 @@ unsafe fn parse_block(mut p: *const u16) -> Vec<(String, String)> {
             return vars;
         }
         let entry = String::from_utf16_lossy(std::slice::from_raw_parts(p, len));
-        // A name may start with '=' (the per-drive current directories, "=C:").
-        if let Some(split) = entry[1..].find('=') {
-            let (name, value) = entry.split_at(split + 1);
+        // A name may start with '=' (the per-drive current directories, "=C:"),
+        // so the separator is the first '=' after the first character. Byte
+        // index 1 is inside that character when it is multibyte, so walk the
+        // chars instead of slicing.
+        if let Some((split, _)) = entry.char_indices().skip(1).find(|&(_, c)| c == '=') {
+            let (name, value) = entry.split_at(split);
             vars.push((name.to_owned(), value[1..].to_owned()));
         }
         p = p.add(len + 1);
@@ -106,6 +109,7 @@ mod tests {
             ("Path".to_string(), r"C:\a;C:\b".to_string()),
             ("=C:".to_string(), r"C:\x".to_string()),
             ("A".to_string(), "1=2".to_string()),
+            ("Übung".to_string(), "ü=é".to_string()),
         ];
         let block = block(&vars);
         let parsed = unsafe { parse_block(block.as_ptr()) };
@@ -115,6 +119,7 @@ mod tests {
                 ("=C:".to_string(), r"C:\x".to_string()),
                 ("A".to_string(), "1=2".to_string()),
                 ("Path".to_string(), r"C:\a;C:\b".to_string()),
+                ("Übung".to_string(), "ü=é".to_string()),
             ]
         );
     }
