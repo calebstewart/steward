@@ -6,7 +6,7 @@ use std::io;
 use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
 
-use steward_ipc::pipe::Server;
+use steward_ipc::pipe::{self, ClientError, Server};
 use steward_ipc::Response;
 
 use crate::log::error;
@@ -16,9 +16,38 @@ use crate::sys::port::Waker;
 /// How long a client waits for the manager to answer.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Why the pipe is not being served.
+pub enum Refusal {
+    /// Another manager of this user serves the session already.
+    Held,
+    /// The name is taken by something that is not a manager of this user's,
+    /// or that cannot be shown to be one: what was found out. Worth trying
+    /// again later.
+    Taken(String),
+    /// Something that trying again will not mend.
+    Failed(io::Error),
+}
+
 /// Create the pipe -- failing if another manager holds it -- and serve it.
-pub fn listen(controls: Sender<Control>, waker: Waker) -> io::Result<()> {
-    let server = Server::create()?;
+pub fn listen(controls: Sender<Control>, waker: Waker) -> Result<(), Refusal> {
+    let server = match Server::create() {
+        Ok(server) => server,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            // The name is public: whose is it?
+            return Err(match pipe::probe() {
+                Ok(()) => Refusal::Held,
+                Err(ClientError::Impostor(who)) => {
+                    Refusal::Taken(format!("it belongs to another user ({who})"))
+                }
+                Err(ClientError::NotRunning) => Refusal::Taken("it has just gone".into()),
+                Err(ClientError::Io(e)) => {
+                    Refusal::Taken(format!("whose it is cannot be told: {e}"))
+                }
+                Err(e) => Refusal::Taken(format!("whose it is cannot be told: {e}")),
+            });
+        }
+        Err(e) => return Err(Refusal::Failed(e)),
+    };
     std::thread::Builder::new()
         .name("control".into())
         .spawn(move || loop {
@@ -39,6 +68,7 @@ pub fn listen(controls: Sender<Control>, waker: Waker) -> io::Result<()> {
                 error!("serving a control client: {e}");
                 std::thread::sleep(Duration::from_millis(100));
             }
-        })?;
+        })
+        .map_err(Refusal::Failed)?;
     Ok(())
 }

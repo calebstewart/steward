@@ -85,12 +85,17 @@ session.
 `stewctl` finds the manager through a named pipe,
 `\\.\pipe\steward-<user SID>-<session>`, whose access list admits only you and
 which refuses remote clients. Before sending anything, `stewctl` checks that
-the process serving the pipe runs as you. A request and its response are one
-line of JSON each.
+the pipe was created by you: its owner is set from the creator's account, and
+nobody but an administrator can make you the owner of what they create. A
+request and its response are one line of JSON each.
 
 The pipe is also the manager's lock: a second manager in the same session
-cannot create it, and does not start. `STEWARD_PIPE` names a different pipe,
-which is how a test manager runs beside the real one.
+cannot create it, and does not start. Pipe names are machine-wide, so another
+account could create yours first; a manager that finds its name taken by
+someone else logs whose it is and tries again, with a growing delay, until the
+name is free. `STEWARD_PIPE` names a different pipe, which is how a test
+manager runs beside the real one; it must be a single name, with no path
+separators in it.
 
 ## Files
 

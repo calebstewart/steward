@@ -3,9 +3,9 @@
 //! [`pipe`]).
 //!
 //! The pipe admits only the user who owns it, refuses remote clients, and the
-//! client checks that the process serving it runs as that user before it
-//! believes a word -- a pipe name is not a secret, and another account could
-//! create one first.
+//! client checks that it was created by that user before it believes a word
+//! -- a pipe name is not a secret, and another account could create one
+//! first.
 
 use serde::{Deserialize, Serialize};
 
