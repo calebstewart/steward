@@ -129,6 +129,8 @@ in
         test "$(service startType)" = automatic
         test "$(service command)" = '"C:\Program Files\steward\steward.exe"'
         test "$(service restartControl)" = 128
+        # Interactive users may not send it user-defined controls (#11).
+        test "$(service securityDescriptor)" = 'D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;IU)(A;;CCLCSWLORC;;;SU)'
         [[ "$(service revision)" =~ ^[0-9a-f]{64}$ ]]
 
         # The binaries are in the closure, as the directory's one source.
