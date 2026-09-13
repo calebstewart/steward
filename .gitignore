@@ -2,3 +2,5 @@
 result
 result-*
 .direnv/
+# `zola build` or `zola serve` in docs/, previewing the site.
+docs/public/

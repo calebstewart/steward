@@ -1,0 +1,16 @@
+{# Included with `toc_entries` set by the caller: minijinja is the template
+   engine as of Zola 0.23 and it has no `{% import %}`, so a shared fragment is
+   an include with a variable rather than a macro.
+
+   One level deep on purpose -- deeper headings exist in these pages, but a
+   sidebar that lists them is an outline, not a nav. #}
+{% if toc_entries %}
+  <div class="toc-wrap">
+    <span class="nav-label">On this page</span>
+    <ul class="toc">
+      {% for h in toc_entries %}
+        <li><a href="{{ h.permalink | safe }}">{{ h.title }}</a></li>
+      {% endfor %}
+    </ul>
+  </div>
+{% endif %}

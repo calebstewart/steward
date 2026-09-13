@@ -1,0 +1,74 @@
+# Build the documentation site and publish it to GitHub Pages.
+#
+# Pages is configured for the "GitHub Actions" source, not a branch: nothing is
+# committed anywhere, the artifact this run uploads *is* the deployment.
+#
+# A pull request that touches the site builds it too, so a broken template or
+# a dead `@/` link shows on the PR; only a push to main deploys.
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - docs/**
+      - nix/docs.nix
+      - flake.nix
+      - flake.lock
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+# Two Pages deployments at once is not something to want, but neither is
+# cancelling a deployment that is already halfway. Pull requests get a group
+# of their own, so a PR build never queues behind a deployment.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pages-pr-{0}', github.event.pull_request.number) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+
+      # No binary cache step. The site is zola plus a handful of markdown
+      # files; everything it needs substitutes from cache.nixos.org in seconds,
+      # and neither the crates nor the Windows cross toolchain is built here.
+
+      # The same derivation `nix build .#docs` realizes locally, so what is
+      # deployed cannot drift from what was previewed.
+      - name: Build the site
+        run: nix build .#docs --print-build-logs
+
+      # upload-pages-artifact will not follow the symlink into the store, and
+      # the store is read-only, so the tree is copied out and made writable.
+      - name: Stage the site
+        run: |
+          cp -rL result site
+          chmod -R u+w site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    # What actions/deploy-pages needs, and only in the job that deploys.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

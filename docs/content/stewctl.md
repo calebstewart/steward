@@ -1,0 +1,210 @@
++++
+title = "stewctl"
+weight = 5
+description = "Every command, after systemctl's own: what it does, and what it prints."
++++
+
+`stewctl` talks to the manager running in the session it is run from, over a
+named pipe only you can open. Its verbs follow `systemctl`. A unit name without
+an extension is a service: `whkd` means `whkd.service`, while a target or a
+timer is named in full.
+
+| Command | |
+| --- | --- |
+| [`stewctl`](#list-units) | List the units. The same as `list-units`. |
+| [`list-timers`](#list-timers) | The timers: when each next elapses, when it last did, and what it starts. |
+| [`status [UNIT...]`](#status) | The manager, or units in detail with the end of their logs. |
+| [`start UNIT...`](#start-stop-restart) | Start units, and what they want or require. |
+| [`stop UNIT...`](#start-stop-restart) | Stop units, until started again or the next sign-in. |
+| [`restart UNIT...`](#start-stop-restart) | Stop and start units; a changed unit starts with its new definition. |
+| [`is-active UNIT...`](#is-active) | Exit 0 if every unit is active, 3 otherwise. |
+| [`switch`](#switch) | Read the unit files and make what runs match them. |
+| [`daemon-reload`](#daemon-reload) | Read the unit files, and only take note. |
+| [`logs [-f] [-n N] UNIT`](#logs) | A unit's output, and steward's lines about it. |
+| [`verify [FILE...]`](#verify) | Check unit files, without a manager. |
+
+Every command but `logs`, `verify` and `switch --if-running` needs a running
+manager; without one it says so and exits 1.
+
+## list-units
+
+Also `list` or `ls`, and what `stewctl` alone runs.
+
+```console
+> stewctl
+UNIT                STATE              PID  RESTARTS  DESCRIPTION
+crash-loop.service  auto-restart         -         4  Exits with code 3 a second after it starts
+komorebi.service    active           10412         0  Tiling window manager
+whkd.service        active*           9876         0  Hotkey daemon
+
+* changed on disk; restart it (or `stewctl switch`) to use the new definition
+```
+
+A `*` after the state marks a unit whose file has changed since it started:
+it is still running its old definition.
+
+### States
+
+| State | |
+| --- | --- |
+| `active` | Running; for a target or a timer, started. |
+| `inactive` | At rest: never started, stopped, or — for `Type=oneshot` — run to completion. |
+| `failed` | Ended badly with no restart to come: its policy said no, or its start limit ran out. It stays down until started again. |
+| `auto-restart` | Waiting out the delay before an automatic restart. |
+| `start-pre`, `start`, `start-post` | On its way up: running `ExecStartPre=`, starting the main process (or a oneshot's commands), running `ExecStartPost=`. |
+| `stop`, `stop-asked`, `stop-killed` | On its way down: running `ExecStop=`, asked to exit, terminated. |
+
+## list-timers
+
+```console
+> stewctl list-timers
+NEXT                     LEFT          LAST                     PASSED         UNIT          ACTIVATES
+Sun 2026-09-13 14:31:00  in 42s        Sun 2026-09-13 14:30:00  17s ago        hello.timer   hello.service
+Mon 2026-09-14 03:00:00  in 12h 29min  Sun 2026-09-13 03:00:00  11h 30min ago  backup.timer  backup.service
+```
+
+The soonest first; a timer with nothing left to wait for shows `-`. Times are
+local. See [Timers](@/timers.md).
+
+## status
+
+With no units, the manager: its version and PID, whether the shell and the
+tray are ready yet, how many units are active, failed and restarting, and where
+the units and logs are.
+
+```console
+> stewctl status
+steward 0.1.0 (pid 7212, session 1)
+   Shell: ready (graphical-session.target reached)
+    Tray: ready (tray.target reached)
+   Units: 5 in C:\Users\alice\AppData\Roaming\steward\units
+          4 active, 0 failed, 1 restarting
+    Logs: C:\Users\alice\AppData\Local\steward\logs
+```
+
+With units, each in detail, then the last ten lines of its log:
+
+```console
+> stewctl status crash-loop
+○ crash-loop.service - Exits with code 3 a second after it starts
+     Loaded: C:\Users\alice\AppData\Roaming\steward\units\crash-loop.service
+     Active: auto-restart since 2026-09-13 14:29:55.422 (3s ago)
+    Restart: in 8.7 s
+   Restarts: 4 (last ended: it exited with code 3)
+  Wanted by: default.target
+
+-- 2026-09-13 14:29:54.387 steward: start
+-- 2026-09-13 14:29:54.389 steward: active, main process 6128
+-- 2026-09-13 14:29:55.422 steward: exited with code 3; restarting in 11.7 s (restart 4)
+```
+
+`Main PID` and `Processes` appear while it runs; a timer shows its next
+`Trigger`, what it `Triggers`, and when it `Last` elapsed.
+
+## start, stop, restart
+
+```console
+stewctl start whkd
+stewctl stop tiling.target
+stewctl restart komorebi whkd
+```
+
+**`start`** starts the units and what they `Wants=` or `Requires=`, in order,
+waiting for the shell or the tray first if they are ordered after it. Starting
+a `failed` unit resets its start limit and backoff.
+
+**`stop`** stops the units, and what `Requires=` them or is `PartOf=` them;
+what only `Wants=` them keeps running. A unit stopped this way stays stopped —
+through a manager crash, an upgrade and every `switch` — until it is started
+again or you next sign in, when every enabled unit starts afresh.
+
+**`restart`** stops and starts the units, and restarts what `Requires=` them
+or is `PartOf=` them. A unit whose file changed starts with its new
+definition.
+
+`start` and `restart` wait, for up to 90 s, until none of the units is still on
+its way up, and then say where each ended:
+
+```console
+> stewctl restart whkd
+whkd.service: active
+```
+
+They exit 1 if any unit ended anywhere but `active`, or finished cleanly as a
+oneshot does. `--no-block` returns as soon as the manager has the request.
+
+## is-active
+
+Prints each unit's state, one per line, and exits 0 if every one of them is
+`active` and 3 otherwise, as `systemctl is-active` does — for scripts.
+
+## switch
+
+```console
+stewctl switch
+```
+
+Reads the unit files and makes what runs match them, as home-manager's
+`sd-switch` does:
+
+- a **removed** unit is stopped;
+- a **changed** unit that is running is restarted with its new definition —
+  except a target or a timer, which takes its new definition at once without
+  one;
+- of the units at rest, what is **new** starts: a new unit, one a target now
+  wants that it did not, or a `failed` one whose definition changed.
+
+A unit you stopped on purpose stays stopped, since `switch` runs after every
+apply that changes a unit, and an apply is no reason to undo a stop.
+
+`--if-running` makes a session with no manager a success, doing nothing: the
+next manager to start reads the units as they are. It is what the [home
+module](@/installation.md#the-home-module) runs.
+
+## daemon-reload
+
+Also `reload`. Reads the unit files again, and only takes note: a removed unit
+is stopped, a new one is loaded but not started, and a changed one keeps
+running as it was started — its old `ExecStop=` included — marked changed until
+it is restarted. `switch` afterwards applies what `daemon-reload` noted.
+
+## logs
+
+```console
+stewctl logs whkd           # the last 50 lines
+stewctl logs -n 200 whkd    # the last 200
+stewctl logs -f whkd        # and keep printing what is appended
+```
+
+Each unit's standard output and error go to
+`%LOCALAPPDATA%\steward\logs\<unit>.log`, and the manager writes its own lines
+about the unit into the same file — started, exited with code 3, restarting in
+5 s, failed — marked `-- <time> steward:`. `logs` reads that file itself, so it
+works with the manager down, falling back to this shell's `%LOCALAPPDATA%`. The
+path is printed first, on standard error, so the output pipes clean; piping it
+into something that stops reading early, like `Select-Object -First 3`, is
+fine.
+
+A misspelt unit gets a suggestion:
+
+```console
+> stewctl logs komorebbi
+stewctl: no unit named komorebbi.service; did you mean komorebi?
+```
+
+Service output carries no timestamps of its own, since it goes straight to the
+file rather than through the manager — which is what keeps a service's output
+working through a manager crash. A log over 8 MiB is set aside as
+`<unit>.log.1` when the unit next starts. The manager's own log is
+`%LOCALAPPDATA%\steward\steward.log`.
+
+## verify
+
+```console
+stewctl verify                          # every unit in %APPDATA%\steward\units
+stewctl verify .\backup.timer .\backup.service
+```
+
+Parses unit files and prints every error and warning with its line, without a
+manager. It exits 1 if any unit has an error, which would keep it from
+loading. See [Checking a unit](@/units.md#checking-a-unit).

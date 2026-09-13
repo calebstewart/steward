@@ -1,0 +1,46 @@
+# Zola configuration for the documentation site at
+# https://calebstew.art/steward.
+#
+# The site is a *project* Pages site, so it is served from a sub-path of the
+# domain rather than its root. Every internal link therefore goes through
+# `get_url` or a `@/`-prefixed markdown link, both of which are rewritten
+# against `base_url`; a hand-written "/foo/" would resolve to the landing page's
+# domain root and 404.
+base_url = "https://calebstew.art/steward"
+
+title = "steward"
+description = "A per-user service manager for Windows, in the spirit of systemd --user: it starts your desktop's daemons at sign-in and keeps them running."
+default_language = "en"
+
+compile_sass = false
+build_search_index = false
+generate_feeds = false
+minify_html = true
+
+[markdown]
+smart_punctuation = true
+
+# `> [!NOTE]` and `> [!WARNING]` blocks.
+github_alerts = true
+
+# Each `##` gets a quiet "#" beside it, rendered by templates/anchor-link.html,
+# so a directive in the reference tables' sections can be linked to directly.
+insert_anchor_links = "right"
+
+# `class` emits class names instead of inline colours, and the light/dark pair
+# is then rendered into one stylesheet whose dark half sits behind a
+# `prefers-color-scheme` query -- which is what `add_color_scheme` adds. Inline
+# colours would bake one theme into the HTML and ignore the reader's setting.
+[markdown.highlighting]
+style = "class"
+light_theme = "ayu-light"
+dark_theme = "ayu-dark"
+add_color_scheme = true
+
+[extra]
+tagline = "A per-user service manager for Windows. It starts your desktop's daemons at sign-in, keeps them running, and tells you what they are doing."
+repository = "https://github.com/calebstewart/steward"
+
+# Absolute, not root-relative: the landing page lives at the domain root, which
+# is *above* this site's base_url, so `get_url` cannot express it.
+author_site = "https://calebstew.art"

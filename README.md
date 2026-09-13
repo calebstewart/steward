@@ -7,7 +7,9 @@ and tells you what they are doing.
 - `steward` -- the manager, hosted by the SCM as a per-user service.
 - `stewctl` -- the command line.
 
-See [DESIGN.md](DESIGN.md) for the design, what has been established on a real
+The documentation is at **<https://calebstew.art/steward>**: installation,
+every unit key, targets, timers and every `stewctl` command. See
+[DESIGN.md](DESIGN.md) for the design, what has been established on a real
 machine, and the roadmap. Supervision (M1) and the control plane (M2) are
 done, and so are integration with winpkgs (M3), the desktop's daemons
 running under it (M4), and timers (M5).
@@ -107,8 +109,13 @@ With Nix (on Linux or in WSL), cross-compiled for Windows:
 
 ```
 nix build          # result/bin/steward.exe, result/bin/stewctl.exe
-nix flake check    # the platform-free crates' tests natively, and the Windows build
+nix flake check    # the platform-free crates' tests natively, the Windows build, and the docs
 ```
+
+The documentation site is [Zola](https://www.getzola.org/) in `docs/`, built
+by `nix build .#docs` and deployed to GitHub Pages from `main` by
+`.github/workflows/pages.yml`. To preview it, `zola serve` in `docs/` (with
+`nix shell nixpkgs#zola`, say) serves it at http://127.0.0.1:1111.
 
 ## Trying the manager without installing it
 
@@ -167,7 +174,8 @@ Once, from an administrator prompt:
 
 ```
 mkdir "C:\Program Files\steward"
-copy steward.exe stewctl.exe "C:\Program Files\steward"
+copy steward.exe "C:\Program Files\steward"
+copy stewctl.exe "C:\Program Files\steward"
 sc create steward type= userown start= auto binPath= "\"C:\Program Files\steward\steward.exe\""
 sc failure steward reset= 60 actions= restart/5000/restart/5000/restart/5000
 ```
