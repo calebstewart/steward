@@ -230,11 +230,25 @@ processes inherit, not through a pipe to the manager: a manager crash cannot
 break a service's output (a Rust program that `println!`s into a closed pipe
 panics). The manager writes its own lines for the unit -- started, exited
 with code N, restarting in 5 s, failed -- into the same file, marked
-`-- <time> steward:`. A log over 8 MiB is set aside as `<unit>.log.1` when the
-unit next starts. The manager's own log is `%LOCALAPPDATA%\steward\steward.log`.
+`-- <time> steward:`.
+
+A log over 8 MiB is set aside as `<unit>.log.1` and begun again: at a start,
+and every 10 s during the run, since a daemon that logs steadily may never
+start again. It is set aside in place -- copied, then cut to nothing -- not
+renamed: the unit's processes hold the inherited handle and would go on
+writing to a renamed file. The handle is append-only, and an append-only
+write lands at the file's current end whatever the handle's position, so
+what they write next begins the emptied file. A line written during the
+copy is lost; the line steward writes near the top of the new log (the
+processes may get a line in first) says so. So a unit has at most two logs'
+worth on disk, the previous `.log.1` being replaced each time. The manager's own log,
+`%LOCALAPPDATA%\steward\steward.log`, is renamed to `steward.log.1` past the
+same size; the manager is its only writer, so a rename loses nothing.
 
 `stewctl logs [-f] <unit>` reads the files directly, so it works with the
-manager down. The price of files over a pipe is that service output carries
+manager down; a tail is read from the file's end in chunks, not whole, so a
+large log costs no more than a small one. The price of files over a pipe is
+that service output carries
 no timestamps of its own. The Windows Event Log needs an administrator to
 register a source; it may carry state transitions later, installed with the
 template.

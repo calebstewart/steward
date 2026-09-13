@@ -97,7 +97,7 @@ which is how a test manager runs beside the real one.
 | Path | |
 | --- | --- |
 | `%APPDATA%\steward\units\` | Your units: `*.service`, `*.target`, `*.timer`. |
-| `%LOCALAPPDATA%\steward\steward.log` | The manager's own log. |
-| `%LOCALAPPDATA%\steward\logs\<unit>.log` | Each unit's output and steward's lines about it; set aside as `<unit>.log.1` past 8 MiB. |
+| `%LOCALAPPDATA%\steward\steward.log` | The manager's own log; set aside as `steward.log.1` past 8 MiB. |
+| `%LOCALAPPDATA%\steward\logs\<unit>.log` | Each unit's output and steward's lines about it; set aside as `<unit>.log.1` past 8 MiB, at a start or during the run. |
 | `%LOCALAPPDATA%\steward\state-<session>.json` | The session's processes, units at rest, active targets and timer schedules. Removed once a stop of everything completes. |
 | `%LOCALAPPDATA%\steward\timers\<unit>` | When a `Persistent=` timer last elapsed. Per user, so it survives sign-out. |

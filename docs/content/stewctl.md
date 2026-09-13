@@ -195,8 +195,13 @@ stewctl: no unit named komorebbi.service; did you mean komorebi?
 Service output carries no timestamps of its own, since it goes straight to the
 file rather than through the manager — which is what keeps a service's output
 working through a manager crash. A log over 8 MiB is set aside as
-`<unit>.log.1` when the unit next starts. The manager's own log is
-`%LOCALAPPDATA%\steward\steward.log`.
+`<unit>.log.1` and begun again, at a start and every 10 s while the unit
+runs, replacing the previous `<unit>.log.1`; a line from steward near the
+top of the new log says so. While the unit runs, the log is copied aside and
+emptied in place, since its processes keep writing to the same file, and a
+line written during the copy can be lost. The manager's own log,
+`%LOCALAPPDATA%\steward\steward.log`, is set aside as `steward.log.1` past the
+same size.
 
 ## verify
 

@@ -68,8 +68,10 @@ const SHELL_POLL: Duration = Duration::from_millis(250);
 /// or not: for a manager that started too late to hear it, or one that never
 /// does. It took under 2 s on gaming-windows, at sign-in and at a restart.
 const TRAY_GRACE: Duration = Duration::from_secs(10);
-/// A unit's log is set aside, once, when it passes this size at a start.
-const LOG_ROTATE_BYTES: u64 = 8 << 20;
+/// How often the units' logs are measured against [`crate::log::CAP`]
+/// during the run. A unit that logs steadily and never starts again would
+/// otherwise fill the disk.
+const LOG_CHECK: Duration = Duration::from_secs(10);
 /// The exit code steward terminates processes with.
 const KILLED: u32 = 0x5354_5744; // "STWD"
 /// NTSTATUS for "unsuccessful": a crash whose exit code could not be read.
@@ -121,6 +123,9 @@ struct Unit {
     /// The last manager left it at rest: reaching a target passes over it,
     /// as that manager's reaching the target did. Until it starts again.
     left_at_rest: bool,
+    /// Its log could not be set aside, and that has been said: once, not
+    /// every time it is tried again.
+    log_warned: bool,
 }
 
 impl Unit {
@@ -139,6 +144,7 @@ impl Unit {
             started_at: None,
             stopped_at: None,
             left_at_rest: false,
+            log_warned: false,
         }
     }
 
@@ -207,6 +213,8 @@ struct Manager {
     startup: SystemTime,
     /// The earliest a timer is next due, as last worked out.
     next_elapse: Option<SystemTime>,
+    /// When the units' logs were last measured.
+    logs_checked: Instant,
 }
 
 /// Run the manager until it is told to stop or detach. `controls` is the
@@ -249,6 +257,7 @@ pub fn run(port: Port, controls: Sender<Control>, inbox: Receiver<Control>) {
         // Sign-in; failing that, now, which is as near as the manager knows.
         startup: logon.unwrap_or_else(SystemTime::now),
         next_elapse: None,
+        logs_checked: Instant::now(),
     };
     manager.load_units();
     manager.adopt();
@@ -829,6 +838,7 @@ impl Manager {
             self.poll_jobs();
             self.check_shell();
             self.timers();
+            self.check_logs();
         }
         match self.exit {
             Some(Exit::Detach) => {
@@ -1349,6 +1359,7 @@ impl Manager {
         which: Process,
     ) -> std::io::Result<u32> {
         if self.units[slot].job.is_none() {
+            self.rotate_log(slot);
             self.new_job(slot)?;
         }
         let service = self.units[slot].machine.service().clone();
@@ -1419,7 +1430,6 @@ impl Manager {
                 unit.name
             );
         }
-        self.rotate_log(slot);
         let unit = &mut self.units[slot];
         unit.job = Some(job);
         unit.job_serial = serial;
@@ -1518,12 +1528,63 @@ impl Manager {
         Some(dir.join(format!("{}.log", self.units[slot].name)))
     }
 
-    fn rotate_log(&self, slot: usize) {
+    /// Every unit's log, measured every [`LOG_CHECK`]: a start is not the
+    /// only time a log can pass the cap.
+    fn check_logs(&mut self) {
+        if self.logs_checked.elapsed() < LOG_CHECK {
+            return;
+        }
+        self.logs_checked = Instant::now();
+        for slot in 0..self.units.len() {
+            self.rotate_log(slot);
+        }
+    }
+
+    /// A unit's log over [`crate::log::CAP`] is set aside as `<unit>.log.1`
+    /// and begun again in place (see [`crate::log::set_aside`]): its
+    /// processes hold an inherited handle to it, and would go on writing to
+    /// a renamed file. A line near the top of the new log says so (its
+    /// processes may get a line in first) -- and, while something runs, that
+    /// a line written during the copy may be missing; at a start there is no
+    /// writer, and nothing is lost.
+    fn rotate_log(&mut self, slot: usize) {
         let Some(path) = self.log_path(slot) else {
             return;
         };
-        if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_ROTATE_BYTES) {
-            let _ = std::fs::rename(&path, path.with_extension("log.1"));
+        if !crate::log::size(&path).is_ok_and(|size| size > crate::log::CAP) {
+            return;
+        }
+        let unit = &self.units[slot];
+        let running = unit.job.is_some() || unit.main.is_some() || unit.control.is_some();
+        let aside = crate::log::aside(&path);
+        match crate::log::set_aside(&path) {
+            Ok(bytes) => {
+                let name = aside.file_name().unwrap_or_default().to_string_lossy();
+                let lost = if running {
+                    "; a line written while it was copied may be missing"
+                } else {
+                    ""
+                };
+                self.units[slot].log_warned = false;
+                self.mark(
+                    slot,
+                    &format!(
+                        "the log passed {} MiB: its first {:.1} MiB are set aside as {name}{lost}",
+                        crate::log::CAP >> 20,
+                        bytes as f64 / (1u64 << 20) as f64
+                    ),
+                );
+            }
+            Err(e) if !unit.log_warned => {
+                warning!(
+                    "{}: its log is over {} MiB and cannot be set aside as {}: {e}",
+                    unit.name,
+                    crate::log::CAP >> 20,
+                    aside.display()
+                );
+                self.units[slot].log_warned = true;
+            }
+            Err(_) => {}
         }
     }
 
@@ -1537,7 +1598,10 @@ impl Manager {
             .append(true)
             .open(path)
         {
-            let _ = writeln!(file, "-- {} steward: {message}", crate::log::timestamp());
+            // One write: the unit's processes append to the same file, and
+            // a line written piecemeal has their output in the middle of it.
+            let line = format!("-- {} steward: {message}\n", crate::log::timestamp());
+            let _ = file.write_all(line.as_bytes());
         }
     }
 
