@@ -17,7 +17,7 @@
 //! wall clock, so time asleep, a clock set right and a new time zone all
 //! count at once.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{BuildHasher, Hasher};
 use std::io::Write;
 use std::os::windows::io::OwnedHandle;
@@ -42,7 +42,9 @@ use windows_sys::Win32::System::SystemServices::{
 
 use crate::control;
 use crate::log::{error, info, warning};
-use crate::state::{self, from_millis, to_millis, Saved, SavedProcess, SavedTimer, SavedUnit};
+use crate::state::{
+    self, from_millis, to_millis, RestState, Saved, SavedProcess, SavedRest, SavedTimer, SavedUnit,
+};
 use crate::sys::clock::{self, Local};
 use crate::sys::job::Job;
 use crate::sys::port::{Packet, Port, Waker};
@@ -116,6 +118,9 @@ struct Unit {
     /// starts it counts `OnUnitActiveSec=` and `OnUnitInactiveSec=` from.
     started_at: Option<SystemTime>,
     stopped_at: Option<SystemTime>,
+    /// The last manager left it at rest: reaching a target passes over it,
+    /// as that manager's reaching the target did. Until it starts again.
+    left_at_rest: bool,
 }
 
 impl Unit {
@@ -133,6 +138,7 @@ impl Unit {
             schedule: Schedule::default(),
             started_at: None,
             stopped_at: None,
+            left_at_rest: false,
         }
     }
 
@@ -145,6 +151,24 @@ impl Unit {
             self.machine.state(),
             State::Inactive | State::Failed | State::AutoRestart
         )
+    }
+
+    /// Where it rests, for the next manager, if it has run (or been refused)
+    /// in this sign-in. One that has not is left to whatever reaches it.
+    fn rest(&self) -> Option<SavedRest> {
+        let state = match self.machine.state() {
+            State::Inactive => RestState::Inactive,
+            State::Failed => RestState::Failed,
+            State::AutoRestart => RestState::AutoRestart,
+            _ => return None,
+        };
+        let outcome = self.machine.last_outcome();
+        let ran = self.left_at_rest || self.stopped_at.is_some() || outcome.is_some();
+        (ran && !self.removed).then(|| SavedRest {
+            state,
+            outcome: outcome.map(Into::into),
+            last_trigger: self.schedule.last_trigger.map(to_millis),
+        })
     }
 }
 
@@ -170,6 +194,12 @@ struct Manager {
     state_dir: Option<PathBuf>,
     /// The session this manager belongs to, and its services with it.
     session: u32,
+    /// When the session's user signed in, if Windows says: which sign-in
+    /// the state file is about.
+    logon: Option<SystemTime>,
+    /// The rests as they were when everything began to be stopped. A stop
+    /// of everything is not a stop of each unit, and does not outlast itself.
+    rests_before_stop_all: Option<BTreeMap<String, SavedRest>>,
     stdin: Option<OwnedHandle>,
     /// When Windows started, and when the session did: what `OnBootSec=`
     /// and `OnStartupSec=` count from.
@@ -192,6 +222,7 @@ pub fn run(port: Port, controls: Sender<Control>, inbox: Receiver<Control>) {
         error!("cannot serve the control pipe: {e}; not starting");
         return;
     }
+    let logon = clock::logon_time(session);
     let mut manager = Manager {
         port,
         inbox,
@@ -209,12 +240,14 @@ pub fn run(port: Port, controls: Sender<Control>, inbox: Receiver<Control>) {
         dirty: false,
         state_dir: crate::log::state_dir(),
         session,
+        logon,
+        rests_before_stop_all: None,
         stdin: process::open_null()
             .map_err(|e| error!("cannot open NUL for services' stdin: {e}"))
             .ok(),
         boot: clock::boot_time(),
         // Sign-in; failing that, now, which is as near as the manager knows.
-        startup: clock::logon_time(session).unwrap_or_else(SystemTime::now),
+        startup: logon.unwrap_or_else(SystemTime::now),
         next_elapse: None,
     };
     manager.load_units();
@@ -267,7 +300,8 @@ impl Manager {
 
     fn want_started(&mut self, names: BTreeSet<String>) {
         for name in names {
-            if self.progress(&name) == Progress::Idle {
+            let left_at_rest = self.slot(&name).is_some_and(|s| self.units[s].left_at_rest);
+            if self.progress(&name) == Progress::Idle && !left_at_rest {
                 self.to_start.insert(name);
             }
         }
@@ -611,15 +645,25 @@ impl Manager {
 
     // ---- adoption -------------------------------------------------------
 
-    /// Take back the services a previous manager in this session left running.
+    /// Take back the services a previous manager in this session left
+    /// running, and leave what it left at rest there.
     fn adopt(&mut self) {
         let Some(path) = self.state_path() else {
             return;
         };
-        let saved = state::load(&path).unwrap_or_else(|e| {
+        let mut saved = state::load(&path).unwrap_or_else(|e| {
             warning!("ignoring the saved state: {e}");
             Saved::default()
         });
+        // A session number is reused by a later sign-in, whose manager starts
+        // afresh. Only processes are still taken back: they are their own
+        // proof, and one that still runs here is this session's.
+        if !saved.same_sign_in(self.logon.map(to_millis)) {
+            info!("the saved state is from an earlier sign-in; starting afresh");
+            saved.targets.clear();
+            saved.timers.clear();
+            saved.rests.clear();
+        }
         for (name, record) in saved.units {
             // The recorded processes that are still the same processes, and
             // still in this session. A process in another session belongs to
@@ -712,7 +756,46 @@ impl Manager {
             );
             info!("{name}: active, as it was");
         }
+        for (name, rest) in saved.rests {
+            self.restore_rest(&name, rest);
+        }
         self.dirty = true;
+    }
+
+    /// Leave a unit where the last manager left it: stopped, finished,
+    /// failed or spent, it stays so; waiting to restart, it is started.
+    fn restore_rest(&mut self, name: &str, rest: SavedRest) {
+        let Some(slot) = self.slot(name) else {
+            return;
+        };
+        let unit = &mut self.units[slot];
+        // Its processes ran after all, and it was adopted.
+        if unit.machine.state() != State::Inactive {
+            return;
+        }
+        let failed = match rest.state {
+            RestState::Inactive => false,
+            RestState::Failed => true,
+            // The delay was the last manager's; this one starts it now,
+            // through the plan, like any start.
+            RestState::AutoRestart => {
+                info!("{name}: was waiting to restart; starting it");
+                self.to_start.insert(name.to_owned());
+                return;
+            }
+        };
+        let outcome = rest.outcome.map(Outcome::from);
+        unit.machine.rest(failed, outcome);
+        unit.left_at_rest = true;
+        if unit.machine.service().is_timer() {
+            unit.schedule.last_trigger = rest.last_trigger.map(from_millis);
+        }
+        let line = match (failed, outcome) {
+            (true, Some(outcome)) => format!("failed, as it was: it {outcome}"),
+            (true, None) => "failed, as it was".to_owned(),
+            (false, _) => "inactive, as it was".to_owned(),
+        };
+        info!("{name}: {line}");
     }
 
     // ---- the loop -------------------------------------------------------
@@ -747,14 +830,23 @@ impl Manager {
             self.check_shell();
             self.timers();
         }
-        self.dirty = true;
-        self.save_if_dirty();
-        let running = self.units.iter().filter(|u| u.job.is_some()).count();
         match self.exit {
             Some(Exit::Detach) => {
+                self.dirty = true;
+                self.save_if_dirty();
+                let running = self.units.iter().filter(|u| u.job.is_some()).count();
                 info!("detached; {running} service(s) left running for the next manager")
             }
-            _ => info!("stopped"),
+            _ => {
+                // Everything was stopped, as at sign-out: the next manager
+                // starts afresh, as at sign-in.
+                if let Some(path) = self.state_path() {
+                    if let Err(e) = state::remove(&path) {
+                        error!("cannot remove the state file {}: {e}", path.display());
+                    }
+                }
+                info!("stopped")
+            }
         }
     }
 
@@ -793,6 +885,7 @@ impl Manager {
                     if self.exit.is_none() {
                         info!("{reason}: stopping every service");
                         self.exit = Some(Exit::StopAll);
+                        self.rests_before_stop_all = Some(self.rests());
                         self.to_start.clear();
                         self.to_stop = self
                             .units
@@ -855,6 +948,7 @@ impl Manager {
                     Decision::Fail { missing } => {
                         error!("{name}: not started: it requires {missing}, which failed or does not exist");
                         self.units[slot].machine.refuse(Outcome::Dependency);
+                        self.dirty = true;
                     }
                 }
             }
@@ -1362,6 +1456,7 @@ impl Manager {
                 unit.stopped_at = now;
             } else {
                 unit.started_at = now;
+                unit.left_at_rest = false;
             }
             // A timer that starts it counts from these.
             self.dirty = true;
@@ -1453,7 +1548,14 @@ impl Manager {
         let Some(path) = self.state_path() else {
             return;
         };
-        let mut saved = Saved::default();
+        let mut saved = Saved {
+            logon: self.logon.map(to_millis),
+            rests: match &self.rests_before_stop_all {
+                Some(rests) => rests.clone(),
+                None => self.rests(),
+            },
+            ..Saved::default()
+        };
         for unit in &self.units {
             let Some(job) = &unit.job else { continue };
             let processes: Vec<SavedProcess> = job
@@ -1504,6 +1606,14 @@ impl Manager {
         if let Err(e) = state::save(&path, &saved) {
             error!("cannot save the state to {}: {e}", path.display());
         }
+    }
+
+    /// The units at rest a next manager is to leave there (or restart).
+    fn rests(&self) -> BTreeMap<String, SavedRest> {
+        self.units
+            .iter()
+            .filter_map(|u| Some((u.name.clone(), u.rest()?)))
+            .collect()
     }
 }
 

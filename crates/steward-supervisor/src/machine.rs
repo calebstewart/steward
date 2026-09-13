@@ -252,6 +252,20 @@ impl Machine {
         out
     }
 
+    /// Leave a unit at rest where a previous manager left it: stopped or
+    /// finished, or `failed`, and how it last ended. It stays there until
+    /// something starts it, as it would have under that manager.
+    pub fn rest(&mut self, failed: bool, last: Option<Outcome>) {
+        if matches!(self.state, State::Inactive | State::Failed) {
+            self.state = if failed {
+                State::Failed
+            } else {
+                State::Inactive
+            };
+            self.last = last;
+        }
+    }
+
     pub fn handle(&mut self, event: Event, now: Instant) -> Vec<Action> {
         let mut out = Vec::new();
         self.step(event, now, &mut out);
@@ -1040,6 +1054,23 @@ mod tests {
         h.feed(JobEmpty);
         assert_eq!(h.state(), State::AutoRestart);
         assert_eq!(h.machine.last_outcome(), Some(Outcome::Vanished));
+    }
+
+    #[test]
+    fn a_rest_left_by_the_last_manager_is_kept_until_started() {
+        let mut h = Harness::new("ExecStart=app.exe\nRestart=no\n");
+        h.machine.rest(true, Some(Outcome::ExitCode(2)));
+        assert_eq!(h.state(), State::Failed);
+        assert_eq!(h.machine.last_outcome(), Some(Outcome::ExitCode(2)));
+        assert_eq!(h.machine.deadline(), None);
+        // Started by someone, it runs as any failed unit would.
+        assert_eq!(h.feed(Start), [SpawnMain(cmd("app.exe"))]);
+        // Only a unit at rest is put back at rest.
+        h.machine.rest(false, None);
+        assert_eq!(h.state(), State::Active);
+        h.main_exits(0);
+        h.machine.rest(false, Some(Outcome::Clean));
+        assert_eq!(h.state(), State::Inactive);
     }
 
     #[test]

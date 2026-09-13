@@ -1,11 +1,14 @@
 //! What a restarted manager needs to take its services back: for each running
 //! service, every process in its job and which of them is the main one;
-//! which targets were active; and each active timer's schedule.
-//! Written on every change to `%LOCALAPPDATA%\steward\state-<session>.json` (a
-//! temporary file renamed over the old, so a crash mid-write leaves the
-//! previous state rather than half of one), and removed when nothing is left
-//! running. One per session, as managers are: a session's services are its
-//! own manager's to adopt.
+//! which targets were active; each active timer's schedule; and the units
+//! left at rest, and what put them there, so that what was stopped, finished,
+//! failed or spent stays so. Written on every change to
+//! `%LOCALAPPDATA%\steward\state-<session>.json` (a temporary file renamed
+//! over the old, so a crash mid-write leaves the previous state rather than
+//! half of one), and removed when there is nothing to record or everything
+//! has been stopped. One per session, as managers are: a session's services
+//! are its own manager's to adopt. Session numbers are reused, so the file
+//! also says which sign-in it is from.
 //!
 //! Also here: the stamps persistent timers leave, one per timer, in
 //! `%LOCALAPPDATA%\steward\timers\<unit>`. Those are the user's, not the
@@ -18,9 +21,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use steward_supervisor::Outcome;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Saved {
+    /// When the session's user signed in, in milliseconds since 1970, UTC:
+    /// the sign-in the rest of the file belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logon: Option<u64>,
     pub units: BTreeMap<String, SavedUnit>,
     /// The targets that were active. They have no processes to find again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -28,6 +36,97 @@ pub struct Saved {
     /// The timers that were active, and where each was in its schedule.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub timers: BTreeMap<String, SavedTimer>,
+    /// The units at rest that had run, or been refused, in this sign-in.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rests: BTreeMap<String, SavedRest>,
+}
+
+impl Saved {
+    /// Whether this is the state of the sign-in that began at `logon`. One
+    /// that does not say is from before sign-ins were recorded, and is taken
+    /// as this one's, as it was then.
+    pub fn same_sign_in(&self, logon: Option<u64>) -> bool {
+        self.logon.is_none() || self.logon == logon
+    }
+
+    /// Nothing runs and nothing is at rest: there is nothing to record.
+    fn is_empty(&self) -> bool {
+        self.units.is_empty()
+            && self.targets.is_empty()
+            && self.timers.is_empty()
+            && self.rests.is_empty()
+    }
+}
+
+/// A unit at rest, and what put it there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedRest {
+    pub state: RestState,
+    /// How it last ended, if it is a service that ran or a unit that was
+    /// refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<SavedOutcome>,
+    /// A timer's last elapse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_trigger: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestState {
+    /// Stopped on purpose, finished, or (a timer) spent: it stays at rest.
+    Inactive,
+    /// It stays failed, as the last manager concluded.
+    Failed,
+    /// Waiting out a restart delay: the next manager owes it the restart.
+    AutoRestart,
+}
+
+/// [`Outcome`], as the file spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SavedOutcome {
+    Clean,
+    ExitCode(u32),
+    Interrupted,
+    Crashed(u32),
+    Vanished,
+    Timeout,
+    SpawnFailed,
+    StartLimit,
+    Dependency,
+}
+
+impl From<Outcome> for SavedOutcome {
+    fn from(outcome: Outcome) -> Self {
+        match outcome {
+            Outcome::Clean => SavedOutcome::Clean,
+            Outcome::ExitCode(code) => SavedOutcome::ExitCode(code),
+            Outcome::Interrupted => SavedOutcome::Interrupted,
+            Outcome::Crashed(code) => SavedOutcome::Crashed(code),
+            Outcome::Vanished => SavedOutcome::Vanished,
+            Outcome::Timeout => SavedOutcome::Timeout,
+            Outcome::SpawnFailed => SavedOutcome::SpawnFailed,
+            Outcome::StartLimit => SavedOutcome::StartLimit,
+            Outcome::Dependency => SavedOutcome::Dependency,
+        }
+    }
+}
+
+impl From<SavedOutcome> for Outcome {
+    fn from(outcome: SavedOutcome) -> Self {
+        match outcome {
+            SavedOutcome::Clean => Outcome::Clean,
+            SavedOutcome::ExitCode(code) => Outcome::ExitCode(code),
+            SavedOutcome::Interrupted => Outcome::Interrupted,
+            SavedOutcome::Crashed(code) => Outcome::Crashed(code),
+            SavedOutcome::Vanished => Outcome::Vanished,
+            SavedOutcome::Timeout => Outcome::Timeout,
+            SavedOutcome::SpawnFailed => Outcome::SpawnFailed,
+            SavedOutcome::StartLimit => Outcome::StartLimit,
+            SavedOutcome::Dependency => Outcome::Dependency,
+        }
+    }
 }
 
 /// An active timer. Times are milliseconds since 1970, UTC.
@@ -83,18 +182,23 @@ pub fn load(path: &Path) -> Result<Saved, String> {
     }
 }
 
-/// Record `saved`; with nothing running there is nothing to record, and the
-/// file goes.
+/// Record `saved`; with nothing running and nothing at rest there is nothing
+/// to record, and the file goes.
 pub fn save(path: &Path, saved: &Saved) -> io::Result<()> {
-    if saved.units.is_empty() && saved.targets.is_empty() && saved.timers.is_empty() {
-        return match std::fs::remove_file(path) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        };
+    if saved.is_empty() {
+        return remove(path);
     }
     let temporary = path.with_extension("json.tmp");
     std::fs::write(&temporary, serde_json::to_vec_pretty(saved)?)?;
     std::fs::rename(&temporary, path)
+}
+
+/// Forget the state: the next manager starts afresh, as at sign-in.
+pub fn remove(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 fn stamp_path(state_dir: &Path, timer: &str) -> PathBuf {
@@ -172,13 +276,79 @@ mod tests {
         );
         save(&file, &timers).unwrap();
         assert_eq!(load(&file).unwrap(), timers);
-        // Nothing running: no file, and none needed to say so.
-        save(&file, &Saved::default()).unwrap();
+        // Nothing running, but something at rest: that is worth a file.
+        let mut rests = Saved {
+            logon: Some(1_757_700_000_000),
+            ..Saved::default()
+        };
+        rests.rests.insert(
+            "late.timer".into(),
+            SavedRest {
+                state: RestState::Inactive,
+                outcome: None,
+                last_trigger: Some(3_000),
+            },
+        );
+        rests.rests.insert(
+            "crash.service".into(),
+            SavedRest {
+                state: RestState::Failed,
+                outcome: Some(Outcome::Crashed(0xC000_0005).into()),
+                last_trigger: None,
+            },
+        );
+        save(&file, &rests).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(r#""state": "failed""#), "{text}");
+        assert!(text.contains(r#""crashed": 3221225477"#), "{text}");
+        assert_eq!(load(&file).unwrap(), rests);
+        // Nothing running and nothing at rest: no file, and none needed to
+        // say so, whichever sign-in it is.
+        let logon_only = Saved {
+            logon: Some(1),
+            ..Saved::default()
+        };
+        save(&file, &logon_only).unwrap();
         assert!(!file.exists());
         save(&file, &Saved::default()).unwrap();
         std::fs::write(&file, "not json").unwrap();
         assert!(load(&file).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn outcomes_survive_the_file() {
+        use Outcome::*;
+        for outcome in [
+            Clean,
+            ExitCode(3),
+            Interrupted,
+            Crashed(0xC000_0409),
+            Vanished,
+            Timeout,
+            SpawnFailed,
+            StartLimit,
+            Dependency,
+        ] {
+            let text = serde_json::to_string(&SavedOutcome::from(outcome)).unwrap();
+            let back: SavedOutcome = serde_json::from_str(&text).unwrap();
+            assert_eq!(Outcome::from(back), outcome, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_state_belongs_to_one_sign_in() {
+        let mine = Saved {
+            logon: Some(1_000),
+            ..Saved::default()
+        };
+        assert!(mine.same_sign_in(Some(1_000)));
+        // The session number was reused by a later sign-in.
+        assert!(!mine.same_sign_in(Some(2_000)));
+        // This manager cannot tell when its session began.
+        assert!(!mine.same_sign_in(None));
+        // A file from before sign-ins were recorded.
+        assert!(Saved::default().same_sign_in(Some(2_000)));
     }
 
     #[test]

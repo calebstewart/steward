@@ -156,7 +156,22 @@ processes are ended.
    limit is `failed`, shown as such, and stays down until started again.
 4. **A stop is deliberate.** A service stopped with `stewctl` stays stopped
    until it is started or the user signs in again; enabled units start at
-   every sign-in.
+   every sign-in. A manager's crash or upgrade is neither. So the state file
+   also records each unit at rest that ran (or was refused) in this
+   sign-in, and what put it there: stopped, finished, failed, or, for a
+   timer, spent. The manager that takes over leaves it there. A failed unit
+   stays failed, as the last manager concluded; `switch` still retries one
+   whose definition changed. A unit waiting out a restart delay is owed its
+   restart, and the new manager starts it at once.
+
+   Session numbers are reused, so the file also records when the session's
+   user signed in, and a manager ignores what a file from another sign-in
+   says about rests, targets and timers. It still takes back any of that
+   file's processes still running in its session. A stop of everything --
+   sign-out, Ctrl+C -- is not a stop of each unit: once done it removes the
+   file, and while it runs the file keeps the rests from before it began.
+   The next sign-in starts afresh, and so does a console manager started
+   again after a Ctrl+C.
 5. **Upgrades are ordinary.** A Stop from the SCM means stop: it is what
    sign-out sends, and the services are stopped in order. An upgrade instead
    sends the instance user-defined control 128, *hand over*: the manager
@@ -253,7 +268,8 @@ settle unless `--no-block`), `is-active`, `daemon-reload`, and
   starts -- a new unit, one a target newly wants, or a failed one whose
   definition changed. A unit stopped on purpose stays stopped, since `switch`
   runs after every apply that changes a unit, and an apply is no reason to
-  undo a stop. `daemon-reload` alone only takes note: a
+  undo a stop. A unit a takeover left at rest is to `switch` like any other
+  at rest. `daemon-reload` alone only takes note: a
   changed unit keeps running as it was started (its `ExecStop=` included)
   until it is restarted, and is marked changed until then.
 - **No `enable`/`disable`.** A unit is enabled by its `[Install] WantedBy=`;
@@ -456,7 +472,9 @@ together, and steward is never more than a second late.
 recorded in the state file with the services' processes, so a manager that
 takes over has the timer where the last one left it: a trigger already
 spent does not elapse again, and an elapse missed in between is made up
-once. `Persistent=` adds a stamp per timer,
+once. A timer that went inactive once spent (`RemainAfterElapse=no`) is
+recorded as a unit at rest, with its last elapse, and stays inactive.
+`Persistent=` adds a stamp per timer,
 `%LOCALAPPDATA%\steward\timers\<unit>`, which is the user's rather than the
 session's. Starting the timer again reads the stamp, so a nightly job that
 fell on a night spent signed out runs at sign-in.
@@ -507,7 +525,12 @@ home-manager runs on systemd, and has nothing to enable.
   after pruning, so a removed unit's file is gone -- as home-manager runs
   `sd-switch`. `--if-running` makes no manager in the session a success (the
   next one reads the files as they are), and without `stewctl` on the PATH
-  it does nothing, so a home applied before the system is harmless.
+  it does nothing, so a home applied before the system is harmless. A
+  switch that finds no manager between a crash or a handover and the next
+  manager is lost, not made up for. The next manager adopts a changed
+  running unit without restarting it, and leaves a unit the last one left
+  at rest there, even one now newly wanted, or failed and changed. A later
+  switch sees only what changes after that manager started.
 
 Binaries that pass through winpkgs must not contain `/nix/store/` (its closure
 build refuses such files); Rust embeds source paths in panic locations, so the
