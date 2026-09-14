@@ -104,6 +104,12 @@ fn wevtutil() -> PathBuf {
 /// provider still registered all leave a channel that imports cleanly --
 /// and the session cannot be stopped from outside to force it, since the
 /// Event Log's own sessions refuse even an administrator's `logman stop`.
+///
+/// Restarting the Event Log service clears it: after `Restart-Service
+/// EventLog`, the same channel imported, listed and took events at once
+/// (2026-09-14). Nothing here restarts it -- that would stop every service
+/// that depends on it -- so the run says which channel, and an
+/// administrator decides.
 const NOT_ENABLED: i32 = 4201;
 
 /// `wevtutil` ran and failed. Its exit code is a Win32 error code, kept so
