@@ -83,25 +83,50 @@ in
       securityDescriptor = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;IU)(A;;CCLCSWLORC;;;SU)";
     };
 
-    # The other half of the elevated install: the Scheduled Task that gives
-    # each user an Event Log channel of their own, `Steward/<their SID>`, for
-    # their units' output. It runs as SYSTEM at the logon of any user,
-    # because creating a channel is administrative and the manager is not,
-    # and because this step cannot know which accounts will ever sign in.
+    # The other half of the elevated install: the task that gives each user
+    # an Event Log channel of their own, `Steward/<their SID>`, for their
+    # units' output. Creating a channel is administrative and the manager is
+    # not, and this step cannot know which accounts will ever sign in to the
+    # machine, so the channels are made at each logon by something running as
+    # SYSTEM.
     #
-    # An activation rather than a resource: winpkgs can enable and disable a
-    # scheduled task but does not create one, and the task carries a security
-    # descriptor (users may run it, not change it) that only the Task
-    # Scheduler's own API can set. steward registers it itself, from the path
-    # it is installed at, so there is one definition of the task rather than
-    # one here and one in the README.
-    #
-    # Re-run when the binaries change, which is the only thing that can
-    # change what the task should say. Idempotent either way: it replaces the
-    # task with the same definition and imports nothing it has imported
-    # before.
+    # Declared rather than registered by steward itself, for the reason
+    # winpkgs declares the service above rather than shelling out to `sc`: a
+    # task winpkgs owns is deleted again when it leaves the configuration,
+    # where a program that registered its own would leave a task running as
+    # SYSTEM behind forever.
+    windows.scheduledTasks."\\steward-provision-eventlog" = {
+      command = exe;
+      arguments = "provision-eventlog";
+      description = "Creates the Windows Event Log channel that each signed-in user's steward units write their output to, one channel per user, named by SID.";
+      author = "steward";
+      # SYSTEM (the default `runAs`), at the logon of any user: a trigger
+      # with no `user` of its own.
+      runLevel = "highest";
+      triggers = [ { type = "logon"; } ];
+      # Windows' default drops a run that begins while one is still going,
+      # and two people signing in at once is exactly when that happens: the
+      # second is the one who would be left without a channel.
+      multipleInstances = "queue";
+      # It works in a second or it is not going to.
+      executionTimeLimit = "PT3M";
+      # Administrators and SYSTEM in full; authenticated users get 0x1200a9,
+      # FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, which the Task Scheduler
+      # reads as "may see it and may run it". Deliberately no write: the task
+      # runs as SYSTEM, so a user who could rewrite its action could run
+      # anything as SYSTEM. Safe to grant because it takes no arguments and
+      # does the same thing every time -- and needed, because the manager
+      # will want to run it on demand, and because a task an unelevated plan
+      # cannot read counts as a change at every apply.
+      securityDescriptor = "D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;0x1200a9;;;AU)";
+    };
+
+    # The task covers every logon after this one. Whoever is signed in right
+    # now would otherwise wait until their next, so the apply runs it once.
+    # Nothing to prune afterwards: unlike registering the task, running it
+    # only creates channels, and those outlive any configuration.
     winpkgs.activation.steward-eventlog = {
-      command = ''& "${exe}" provision-eventlog --install'';
+      command = ''& "${exe}" provision-eventlog'';
       triggers = [ cfg.package ];
     };
   };

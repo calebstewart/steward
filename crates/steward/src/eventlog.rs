@@ -1,20 +1,30 @@
 //! `steward provision-eventlog`: the Event Log channel each signed-in user's
-//! units write their output to, and the Scheduled Task that keeps the set of
-//! them up to date.
+//! units write their output to.
 //!
 //! Creating a channel is administrative -- a manifest imported by an
 //! administrator, and an access descriptor only an administrator may set --
 //! and the manager is not. Users appear after the install, too, which is the
 //! other half of the problem: the one elevated step that registers the
 //! service does not know what accounts will ever sign in to the machine. So
-//! the install registers a task instead of a channel, and the task creates
-//! the channels, as SYSTEM, at the logon of any user.
+//! something runs as SYSTEM at the logon of any user, and creates the
+//! channels then. That something is a Scheduled Task.
 //!
-//! The task takes no arguments and does the same thing every time, which is
-//! what lets it be given a security descriptor that ordinary users may run
-//! but not modify: a user can ask for their channel without being given
-//! anything else, and cannot turn a task that runs as SYSTEM into a task
-//! that runs something of theirs.
+//! **The task is not registered here.** It is declared, like the service
+//! beside it, by whatever installs steward: `windows.scheduledTasks` in
+//! `nix/winpkgs/system.nix`, or by hand as the README sets out. This program
+//! is only ever the thing the task runs. That division is deliberate --
+//! winpkgs deletes a task it declared once it leaves a configuration, where
+//! a program that registered its own would leave it behind forever -- and it
+//! is why nothing here talks to the Task Scheduler.
+//!
+//! What the task's declaration must get right, wherever it is written: run
+//! as SYSTEM, trigger at the logon of *any* user, queue a second run rather
+//! than dropping it (two people signing in at once would otherwise cost one
+//! of them a channel), start on battery, and carry a security descriptor
+//! granting ordinary users read and execute but not write. That last one
+//! matters because the task runs as SYSTEM: a user who could rewrite its
+//! action could run anything as SYSTEM. It is safe to grant because this
+//! program takes no arguments and does the same thing every time.
 //!
 //! Three things happen in a run, in order, and each is skipped when it has
 //! nothing to do:
@@ -33,26 +43,7 @@ use std::process::Command;
 
 use steward_eventlog::{channel_access, channel_name, manifest, sids_in};
 
-use crate::sys::{session, task};
-
-/// The task's name, in the root folder. The manager will want to run it on
-/// demand one day (a channel that does not exist yet is output the shim has
-/// to hold), so the name is part of the interface and not decoration.
-pub const TASK: &str = "steward-provision-eventlog";
-
-/// Who may do what with the task.
-///
-/// Administrators and SYSTEM get all of it. Authenticated users get
-/// `0x1200a9`, which is `FILE_GENERIC_READ | FILE_GENERIC_EXECUTE` and which
-/// the Task Scheduler reads as "may see it and may run it"; it is the right
-/// Windows itself grants on a task meant to be runnable by whoever is signed
-/// in (`\Microsoft\Windows\Defrag\ScheduledDefrag` grants Local Service
-/// exactly this). What is deliberately not in it is `FILE_GENERIC_WRITE`:
-/// this task runs as SYSTEM, so a user who could change its action could run
-/// anything as SYSTEM. Inheritance from the root folder is left alone, as on
-/// every task Windows ships, and adds nothing beyond administrators and
-/// SYSTEM again.
-const TASK_ACCESS: &str = "D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;0x1200a9;;;AU)";
+use crate::sys::session;
 
 /// Where the manifest lives: machine-wide state, beside no binaries.
 ///
@@ -242,31 +233,14 @@ fn access(channel: &str) -> io::Result<Option<String>> {
         .map(|sddl| sddl.trim().to_string()))
 }
 
-/// The elevated install step: register the task, then do what it does.
+/// The uninstall: every channel steward made, and everything in them.
 ///
-/// The run at install is what gives whoever is signed in right now a
-/// channel; without it they would wait for their next sign-in.
-pub fn install() -> io::Result<Report> {
-    let exe = std::env::current_exe()?;
-    task::register(TASK, &task_xml(&exe.to_string_lossy()), TASK_ACCESS)?;
-    let mut report = Report::default();
-    report.say(format!("task {TASK} registered, running {}", exe.display()));
-
-    let run = provision()?;
-    report.0.extend(run.0);
-    report.keep();
-    Ok(report)
-}
-
-/// The uninstall: the task goes, and so do the channels and everything in
-/// them.
+/// Not the task: that is winpkgs' to prune, or the administrator's to delete
+/// (`nix/winpkgs/system.nix`, and the README). Channels cannot be resources
+/// the way the task is -- they appear at a logon winpkgs never sees, one per
+/// account -- so removing them stays here.
 pub fn uninstall() -> io::Result<Report> {
     let mut report = Report::default();
-    report.say(match task::remove(TASK)? {
-        true => format!("task {TASK} deleted"),
-        false => format!("task {TASK} was not registered"),
-    });
-
     let path = manifest_path()?;
     match std::fs::read_to_string(&path) {
         Ok(text) => {
@@ -284,128 +258,8 @@ pub fn uninstall() -> io::Result<Report> {
     Ok(report)
 }
 
-/// The task: run `exe provision-eventlog`, as SYSTEM, when anybody logs on.
-///
-/// The settings that are not the defaults, and why each is not:
-///
-/// - `MultipleInstancesPolicy` is `Queue`. The default drops a run that
-///   begins while one is still going, and two people signing in at once is
-///   exactly when that happens -- the second would be the one left without a
-///   channel.
-/// - `DisallowStartIfOnBatteries` is false. The default is true, so on a
-///   laptop away from its charger the task would simply not run at logon.
-/// - `AllowStartOnDemand` is true, so the task can be run by hand, and by
-///   the manager when it has a reason to.
-/// - `ExecutionTimeLimit` is three minutes rather than the default three
-///   days: this either works in a second or is not going to.
-fn task_xml(exe: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Author>steward</Author>
-    <Description>Creates the Windows Event Log channel that each signed-in user's steward units write their output to, one channel per user, named by SID. Takes no arguments and does the same thing every time.</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <LogonTrigger>
-      <Enabled>true</Enabled>
-    </LogonTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>S-1-5-18</UserId>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>Queue</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>false</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT3M</ExecutionTimeLimit>
-    <Priority>7</Priority>
-    <IdleSettings>
-      <StopOnIdleEnd>false</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>{}</Command>
-      <Arguments>provision-eventlog</Arguments>
-    </Exec>
-  </Actions>
-</Task>
-"#,
-        escape(exe)
-    )
-}
-
-/// The characters XML reserves, for the one value interpolated into the task:
-/// the path steward was installed as.
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    /// The settings a logon-triggered SYSTEM task gets wrong by default, and
-    /// the shape of the thing: SYSTEM, at anyone's logon, running the
-    /// subcommand with nothing else on the command line.
-    #[test]
-    fn the_task_says_what_it_must() {
-        let xml = task_xml(r"C:\Program Files\steward\steward.exe");
-        assert!(xml.contains("<UserId>S-1-5-18</UserId>"));
-        assert!(xml.contains("<LogonTrigger>"));
-        // Any user: a LogonTrigger with no UserId of its own.
-        assert!(!xml.contains("<UserId>S-1-5-21"));
-        assert!(xml.contains("<MultipleInstancesPolicy>Queue</MultipleInstancesPolicy>"));
-        assert!(xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"));
-        assert!(xml.contains("<AllowStartOnDemand>true</AllowStartOnDemand>"));
-        assert!(xml.contains(r"<Command>C:\Program Files\steward\steward.exe</Command>"));
-        assert!(xml.contains("<Arguments>provision-eventlog</Arguments>"));
-    }
-
-    /// A path with a reserved character in it still gives well-formed XML.
-    #[test]
-    fn the_path_is_escaped() {
-        let xml = task_xml(r"C:\a & b\steward.exe");
-        assert!(xml.contains(r"<Command>C:\a &amp; b\steward.exe</Command>"));
-        assert!(!xml.contains("& b"));
-    }
-
-    /// Users may run the task and may not change it; if they could, a task
-    /// that runs as SYSTEM would be a way to become SYSTEM.
-    #[test]
-    fn users_may_run_the_task_and_not_write_it() {
-        // 0x1200a9 is FILE_GENERIC_READ | FILE_GENERIC_EXECUTE. FILE_GENERIC_WRITE
-        // (0x120116) shares no bit with it beyond SYNCHRONIZE and READ_CONTROL.
-        let users = 0x1200a9u32;
-        assert_eq!(users & 0x0002, 0, "FILE_WRITE_DATA");
-        assert_eq!(users & 0x0004, 0, "FILE_APPEND_DATA");
-        assert_eq!(users & 0x0010, 0, "FILE_WRITE_EA");
-        assert_eq!(users & 0x10000, 0, "DELETE");
-        assert_eq!(users & 0x40000, 0, "WRITE_DAC");
-        assert_ne!(users & 0x0001, 0, "FILE_READ_DATA");
-        assert_ne!(users & 0x0020, 0, "FILE_EXECUTE");
-        assert!(TASK_ACCESS.contains(&format!("(A;;0x{users:x};;;AU)")));
-        assert!(TASK_ACCESS.contains("(A;;FA;;;BA)"));
-        assert!(TASK_ACCESS.contains("(A;;FA;;;SY)"));
-    }
-
     /// The one line of `wevtutil gl` that matters, out of the rest of it.
     #[test]
     fn the_descriptor_is_read_off_the_listing() {

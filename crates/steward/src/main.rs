@@ -5,10 +5,11 @@
 //!   steward --console    run in the foreground until Ctrl+C (development)
 //!   steward --ctrl-c PID...
 //!                        (internal) deliver Ctrl+C to the consoles of PIDs
-//!   steward provision-eventlog [--install | --uninstall]
-//!                        create the signed-in users' Event Log channels;
-//!                        run as SYSTEM by a Scheduled Task at every logon,
-//!                        which `--install` registers (elevated)
+//!   steward provision-eventlog [--uninstall]
+//!                        create the signed-in users' Event Log channels, or
+//!                        remove every channel it has made. Run as SYSTEM by
+//!                        a Scheduled Task at every logon, which the install
+//!                        declares rather than this registering it.
 //!
 //! Either way the manager is the same code: `manager::run`, fed controls by
 //! the SCM's control handler or the console's Ctrl+C handler.
@@ -43,12 +44,12 @@ fn main() {
         }
         Some("provision-eventlog") => {
             let done = match args.get(1).map(String::as_str) {
-                None => eventlog::provision(),
-                Some("--install") => eventlog::install(),
-                Some("--uninstall") => eventlog::uninstall(),
-                Some(other) => {
-                    eprintln!("steward provision-eventlog: {other} is not one of its arguments");
-                    eprintln!("usage: steward provision-eventlog [--install | --uninstall]");
+                None if args.len() == 1 => eventlog::provision(),
+                Some("--uninstall") if args.len() == 2 => eventlog::uninstall(),
+                _ => {
+                    eprintln!("usage: steward provision-eventlog [--uninstall]");
+                    eprintln!("  (with no arguments it creates the channels; the Scheduled Task");
+                    eprintln!("   that runs it is declared by the install, not by steward)");
                     std::process::exit(2);
                 }
             };

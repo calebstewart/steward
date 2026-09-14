@@ -277,11 +277,15 @@ user (`Steward/<their SID>`, granted to that user, administrators and
 SYSTEM), and the file stays the default while it gets there. Creating a
 channel needs an administrator, and the accounts that will sign in to a
 machine are not known to the one elevated step that registers the template,
-so the install registers a Scheduled Task as well: `steward
+so the install declares a Scheduled Task as well: `steward
 provision-eventlog`, run as SYSTEM at the logon of any user, which
 regenerates a channels-only manifest from the sessions signed in and imports
 it. It takes no arguments and is idempotent, which is what lets it carry a
-descriptor that users may run but not change. `steward-eventlog` holds the
+descriptor that users may run but not change. Declared by whatever installs
+steward -- `windows.scheduledTasks`, or the README's by-hand steps -- and not
+registered by steward itself, for the same reason the service is: a task
+winpkgs owns is deleted again when steward leaves a configuration, where a
+program that registered its own would leave one running as SYSTEM behind. `steward-eventlog` holds the
 names, the provider GUIDs and the manifest, because the task and the
 per-unit shim that writes the events have to agree on all three without
 talking to each other. The rest -- the shim, `stewctl logs` against a
