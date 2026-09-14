@@ -81,20 +81,37 @@
         "winpkgs": "winpkgs"
       }
     },
+    "winget-pkgs": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1789353538,
+        "narHash": "sha256-6mma6mjtxhT7jj+4OOU4b7Xe2ceVWau2A6ELkwgBnbc=",
+        "owner": "microsoft",
+        "repo": "winget-pkgs",
+        "rev": "10e9803789c33d104e0dea0986e51160b4683780",
+        "type": "github"
+      },
+      "original": {
+        "owner": "microsoft",
+        "repo": "winget-pkgs",
+        "type": "github"
+      }
+    },
     "winpkgs": {
       "inputs": {
         "home-manager": "home-manager",
         "nixos-wsl": "nixos-wsl",
         "nixpkgs": [
           "nixpkgs"
-        ]
+        ],
+        "winget-pkgs": "winget-pkgs"
       },
       "locked": {
-        "lastModified": 1789320146,
-        "narHash": "sha256-R7xlUTrKWAXYSP19Y91WKwrljlTiZYaTVZRbOWfhvbE=",
+        "lastModified": 1789416574,
+        "narHash": "sha256-cSpOICmpFl3nWzpeonHkA952x+SplxeWs94LCg7nREI=",
         "owner": "calebstewart",
         "repo": "winpkgs",
-        "rev": "d51dc30c17a0f04de55fc6e930180af52bdc8a38",
+        "rev": "39693d3bcc7a532f2d242db6b8de55feda2dc75a",
         "type": "github"
       },
       "original": {
