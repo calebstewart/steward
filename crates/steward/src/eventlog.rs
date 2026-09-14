@@ -40,10 +40,18 @@
 //!    they are wrong.
 //!
 //! Running it again with the same sessions writes nothing at all.
+//!
+//! One channel that cannot be enabled does not cost the others their run.
+//! The import then installs everything and still fails, and the channel
+//! cannot be listed or set afterwards; the run carries on with everyone
+//! else's, names the one it could not reach, and exits non-zero at the end
+//! so that the task's last result shows it.
 
+use std::fmt;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use steward_eventlog::{channel_access, channel_name, manifest, sids_in, size_in, ChannelSize};
 
@@ -70,11 +78,53 @@ fn report_path() -> io::Result<PathBuf> {
     Ok(manifest_path()?.with_file_name("provision-eventlog.log"))
 }
 
+/// `%SystemRoot%`, where `wevtutil` and every channel's file live.
+fn system_root() -> PathBuf {
+    std::env::var_os("SystemRoot")
+        .unwrap_or_else(|| r"C:\Windows".into())
+        .into()
+}
+
 /// `wevtutil.exe` by its full path. Named absolutely rather than found on
 /// the PATH because this runs as SYSTEM and the PATH is not ours.
 fn wevtutil() -> PathBuf {
-    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-    PathBuf::from(root).join("System32").join("wevtutil.exe")
+    system_root().join("System32").join("wevtutil.exe")
+}
+
+/// `ERROR_WMI_INSTANCE_NOT_FOUND`: what `wevtutil im` exits with when it
+/// installed every publisher and channel but could not enable one of them,
+/// and what `wevtutil gl` and `sl` then exit with for that channel.
+///
+/// Seen for one channel (2026-09-14, #33) after an hour of load tests on
+/// it had filled its trace session's backing file again and again, and it
+/// outlasted the channel: removed and imported again, the channel under the
+/// same name still could not be enabled, while channels for other SIDs in
+/// the same import were fine. Not reproduced on purpose -- a second of
+/// three million events, `um` in the middle of one, `um` and `im` with the
+/// provider still registered all leave a channel that imports cleanly --
+/// and the session cannot be stopped from outside to force it, since the
+/// Event Log's own sessions refuse even an administrator's `logman stop`.
+const NOT_ENABLED: i32 = 4201;
+
+/// `wevtutil` ran and failed. Its exit code is a Win32 error code, kept so
+/// that one failure can be told from another; see [`exit_code`].
+#[derive(Debug)]
+struct Failed {
+    code: Option<i32>,
+    message: String,
+}
+
+impl fmt::Display for Failed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Failed {}
+
+/// The exit code of the `wevtutil` behind an error from [`run`], if it ran.
+fn exit_code(e: &io::Error) -> Option<i32> {
+    e.get_ref()?.downcast_ref::<Failed>()?.code
 }
 
 /// Run `wevtutil` and give back what it said, or what went wrong.
@@ -83,15 +133,24 @@ fn run(args: &[&str]) -> io::Result<String> {
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
+        // On one line: it goes in the report, a line to a thing done, and
+        // `wevtutil` says most things over two.
         let said = String::from_utf8_lossy(&output.stderr);
-        let said = said.trim();
-        Err(io::Error::other(format!(
-            "wevtutil {} failed ({}){}{}",
-            args.join(" "),
-            output.status,
-            if said.is_empty() { "" } else { ": " },
-            said
-        )))
+        let said: Vec<&str> = said
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        Err(io::Error::other(Failed {
+            code: output.status.code(),
+            message: format!(
+                "wevtutil {} failed ({}){}{}",
+                args.join(" "),
+                output.status,
+                if said.is_empty() { "" } else { ": " },
+                said.join(" ")
+            ),
+        }))
     }
 }
 
@@ -185,6 +244,7 @@ pub fn provision(size: ChannelSize) -> io::Result<Report> {
     let was = size_in(&before).unwrap_or(size);
     let changed = manifest(&sids, &exe, was) != before;
     let missing: Vec<&String> = after.iter().filter(|sid| !exists(sid)).collect();
+    let mut not_imported = None;
     if text != before {
         report.say(format!(
             "manifest {} {}",
@@ -206,8 +266,18 @@ pub fn provision(size: ChannelSize) -> io::Result<Report> {
         if !missing.is_empty() {
             report.say(format!("{} channels to re-create", missing.len()));
         }
-        run(&["im", &path.to_string_lossy()])?;
-        report.say("manifest imported");
+        match run(&["im", &path.to_string_lossy()]) {
+            Ok(_) => report.say("manifest imported"),
+            // Everything is installed, and some channel is not enabled: the
+            // pass below finds which, and does everyone else's regardless.
+            // Returning here would leave every channel's descriptor unchecked
+            // for the sake of one, at every logon for as long as it lasts.
+            Err(e) if exit_code(&e) == Some(NOT_ENABLED) => {
+                report.say("manifest imported, but not every channel could be enabled");
+                not_imported = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
     } else {
         report.say("nothing to import");
     }
@@ -224,25 +294,37 @@ pub fn provision(size: ChannelSize) -> io::Result<Report> {
     // size back at once, but the file keeps its size and its records, and
     // wraps at the size it had reached until the channel is cleared. So the
     // size reads as right from the next run on, while the file is larger.
+    //
+    // A channel that cannot be listed or set is named and passed over, and
+    // the rest are still done.
     let mut access_set = 0;
     let mut size_set = 0;
+    let mut passed_over = Vec::new();
     for sid in &after {
         let channel = channel_name(sid);
-        let listed = Listing::of(&channel);
         let access = channel_access(sid);
         let access_arg = format!("/ca:{access}");
         let size_arg = format!("/ms:{}", size.bytes());
-        let mut args = vec!["sl", &channel];
-        if listed.access.as_deref() != Some(access.as_str()) {
-            args.push(&access_arg);
-            access_set += 1;
-        }
-        if listed.size != Some(size.bytes()) {
-            args.push(&size_arg);
-            size_set += 1;
-        }
-        if args.len() > 2 {
-            run(&args)?;
+        let done = Listing::of(&channel).and_then(|listed| {
+            let access_wrong = listed.access.as_deref() != Some(access.as_str());
+            let size_wrong = listed.size != Some(size.bytes());
+            let mut args = vec!["sl", channel.as_str()];
+            if access_wrong {
+                args.push(&access_arg);
+            }
+            if size_wrong {
+                args.push(&size_arg);
+            }
+            if args.len() > 2 {
+                run(&args)?;
+            }
+            access_set += usize::from(access_wrong);
+            size_set += usize::from(size_wrong);
+            Ok(())
+        });
+        if let Err(e) = done {
+            report.say(format!("{channel} passed over: {e}"));
+            passed_over.push(channel);
         }
     }
     report.say(match access_set {
@@ -255,7 +337,18 @@ pub fn provision(size: ChannelSize) -> io::Result<Report> {
     });
 
     report.keep();
-    Ok(report)
+    if !passed_over.is_empty() {
+        return Err(io::Error::other(format!(
+            "{} of {} channels not provisioned: {}",
+            passed_over.len(),
+            after.len(),
+            passed_over.join(", ")
+        )));
+    }
+    match not_imported {
+        Some(e) => Err(e),
+        None => Ok(report),
+    }
 }
 
 /// Whether `sid`'s channel is registered on this machine.
@@ -264,23 +357,25 @@ fn exists(sid: &str) -> bool {
 }
 
 /// What `wevtutil gl` says of a channel, as much of it as a run checks.
-/// Both `None` when there is no such channel.
+/// Each is `None` when the listing does not say.
 #[derive(Default, Debug, PartialEq)]
 struct Listing {
     /// `channelAccess`, the channel's SDDL.
     access: Option<String>,
     /// `maxSize`, in bytes.
     size: Option<u64>,
+    /// `logFileName`, the channel's `.evtx`, unexpanded.
+    file: Option<String>,
 }
 
 impl Listing {
-    fn of(channel: &str) -> Listing {
-        run(&["gl", channel])
-            .map(|listed| Listing::read(&listed))
-            .unwrap_or_default()
+    /// The channel's listing, or why there is none: no such channel, or one
+    /// whose session is broken ([`NOT_ENABLED`]).
+    fn of(channel: &str) -> io::Result<Listing> {
+        run(&["gl", channel]).map(|listed| Listing::read(&listed))
     }
 
-    /// The two lines that matter, out of the rest of it.
+    /// The lines that matter, out of the rest of it.
     fn read(listed: &str) -> Listing {
         let field = |name: &str| {
             listed
@@ -291,11 +386,81 @@ impl Listing {
         Listing {
             access: field("channelAccess:").map(str::to_string),
             size: field("maxSize:").and_then(|bytes| bytes.parse().ok()),
+            file: field("logFileName:")
+                .filter(|file| !file.is_empty())
+                .map(str::to_string),
+        }
+    }
+}
+
+/// The `.evtx` a channel keeps its records in.
+///
+/// As `wevtutil gl` says, when it can. When it cannot -- a channel whose
+/// session is broken fails to list at all ([`NOT_ENABLED`]) -- the path is
+/// the one the Event Log gives every channel whose manifest names none,
+/// which steward's never do: the channel's name, its `/` written `%4`, in
+/// `%SystemRoot%\System32\winevt\Logs`.
+fn log_file(channel: &str) -> PathBuf {
+    match Listing::of(channel).ok().and_then(|listed| listed.file) {
+        Some(file) => PathBuf::from(expand(&file, |name| std::env::var(name).ok())),
+        None => system_root()
+            .join(r"System32\winevt\Logs")
+            .join(format!("{}.evtx", channel.replace('/', "%4"))),
+    }
+}
+
+/// `%NAME%` replaced by the variable `var` gives for `NAME`, as
+/// `ExpandEnvironmentStrings` does it. A `%` that does not begin one is left
+/// as it is, which matters here: a channel's file is named with a `%4` for
+/// the `/` in the channel's name, so `logFileName` is
+/// `%SystemRoot%\System32\Winevt\Logs\Steward%4<SID>.evtx`.
+fn expand(text: &str, var: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let named = after
+            .find('%')
+            .and_then(|end| Some((end, var(&after[..end])?)));
+        match named {
+            Some((end, value)) => {
+                out.push_str(&value);
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push('%');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Delete a channel's file, giving the Event Log service a moment if it
+/// still has it open. It holds the file for as long as the channel exists,
+/// and in every test so far (2026-09-14) let go of it by the time `wevtutil
+/// um` returned, flooded or not; five seconds of retrying is cheap beside a
+/// file left behind if one day it does not. `Ok(false)` if there was no file
+/// to delete.
+fn delete(file: &Path) -> io::Result<bool> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match std::fs::remove_file(file) {
+            Ok(()) => return Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) if Instant::now() >= deadline => return Err(e),
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
         }
     }
 }
 
 /// The uninstall: every channel steward made, and everything in them.
+///
+/// `wevtutil um` removes a channel and leaves its `.evtx` where it was
+/// (seen 2026-09-14, #33), so the files are deleted here, after it. They
+/// are found before it, while each channel can still say where its file is.
 ///
 /// Not the task: that is winpkgs' to prune, or the administrator's to delete
 /// (`nix/winpkgs/system.nix`, and the README). Channels cannot be resources
@@ -304,31 +469,57 @@ impl Listing {
 pub fn uninstall() -> io::Result<Report> {
     let mut report = Report::default();
     let path = manifest_path()?;
-    match std::fs::read_to_string(&path) {
-        Ok(text) => {
-            let channels = sids_in(&text).len();
-            run(&["um", &path.to_string_lossy()])?;
-            std::fs::remove_file(&path)?;
-            let _ = std::fs::remove_file(report_path()?);
-            report.say(format!("{channels} channels removed, with their records"));
-        }
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             report.say("no manifest: no channels of ours to remove");
+            return Ok(report);
         }
         Err(e) => return Err(e),
+    };
+    let sids = sids_in(&text);
+    let files: Vec<PathBuf> = sids
+        .iter()
+        .map(|sid| log_file(&channel_name(sid)))
+        .collect();
+
+    run(&["um", &path.to_string_lossy()])?;
+    std::fs::remove_file(&path)?;
+    let _ = std::fs::remove_file(report_path()?);
+    report.say(format!("{} channels removed", sids.len()));
+
+    let mut deleted = 0;
+    let mut left = 0;
+    for file in &files {
+        match delete(file) {
+            Ok(true) => deleted += 1,
+            Ok(false) => {}
+            Err(e) => {
+                report.say(format!("{} left behind: {e}", file.display()));
+                left += 1;
+            }
+        }
+    }
+    report.say(format!(
+        "{deleted} of their .evtx files deleted, records and all"
+    ));
+    if left > 0 {
+        return Err(io::Error::other(format!(
+            "{left} .evtx files left behind; delete them by hand"
+        )));
     }
     Ok(report)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Listing;
+    use super::{expand, Listing};
 
-    /// The descriptor and the size, off a listing laid out as `wevtutil gl`
-    /// lays one out (the Application channel's, 2026-09-14, with the
-    /// descriptor shortened).
+    /// The descriptor, the size and the file, off a listing laid out as
+    /// `wevtutil gl` lays one out (the Application channel's, 2026-09-14,
+    /// with the descriptor shortened).
     #[test]
-    fn the_descriptor_and_size_are_read_off_the_listing() {
+    fn the_descriptor_size_and_file_are_read_off_the_listing() {
         let listing = "name: Steward/S-1-5-18\r\nenabled: true\r\ntype: Operational\r\n\
              owningPublisher: \r\nisolation: Custom\r\n\
              channelAccess: O:BAG:SYD:(A;;0x7;;;BA)\r\nlogging:\r\n  \
@@ -340,14 +531,34 @@ mod tests {
             Listing {
                 access: Some("O:BAG:SYD:(A;;0x7;;;BA)".to_string()),
                 size: Some(64 << 20),
+                file: Some(r"%SystemRoot%\System32\Winevt\Logs\Steward%4S-1-5-18.evtx".to_string()),
             }
         );
     }
 
-    /// A listing missing either reads as wrong, and so is set.
+    /// A listing missing any of them reads as wrong, and so is set; a file
+    /// it does not name is the default one.
     #[test]
     fn what_is_not_there_is_none() {
         assert_eq!(Listing::read(""), Listing::default());
         assert_eq!(Listing::read("logging:\n  maxSize: lots\n").size, None);
+        assert_eq!(Listing::read("logging:\n  logFileName: \n").file, None);
+    }
+
+    /// `%SystemRoot%` is expanded, and the `%4` that stands for the channel
+    /// name's `/` is not mistaken for the start of another.
+    #[test]
+    fn the_file_name_is_expanded() {
+        let var = |name: &str| (name == "SystemRoot").then(|| r"C:\Windows".to_string());
+        assert_eq!(
+            expand(
+                r"%SystemRoot%\System32\Winevt\Logs\Steward%4S-1-5-18.evtx",
+                var
+            ),
+            r"C:\Windows\System32\Winevt\Logs\Steward%4S-1-5-18.evtx"
+        );
+        assert_eq!(expand("a%4b%c%SystemRoot%", var), r"a%4b%cC:\Windows");
+        assert_eq!(expand("%unset%%", var), "%unset%%");
+        assert_eq!(expand("", var), "");
     }
 }
