@@ -249,7 +249,9 @@ itself in `%ProgramData%\steward\provision-eventlog.log`. A channel the Event
 Log cannot enable -- seen once, for a channel whose session had been flooded
 for an hour, and importing it again did not help -- is named there and
 passed over, the others are provisioned regardless, and the run exits 1, so
-the task's last result shows it.
+the task's last result shows it. Restarting the Event Log service
+(`Restart-Service EventLog -Force`, which restarts the services that depend
+on it too) or the machine clears it, and the next run provisions the channel.
 
 `--channel-size` is the most each user's channel may hold before its oldest
 records are overwritten: bytes, or a whole number of `KiB`, `MiB` or `GiB`,
