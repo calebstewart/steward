@@ -288,8 +288,16 @@ winpkgs owns is deleted again when steward leaves a configuration, where a
 program that registered its own would leave one running as SYSTEM behind. `steward-eventlog` holds the
 names, the provider GUIDs and the manifest, because the task and the
 per-unit shim that writes the events have to agree on all three without
-talking to each other. The rest -- the shim, `stewctl logs` against a
-channel, and the buffering that covers a first sign-in -- is still to come.
+talking to each other -- and, now, the events' own names and fields, because
+`stewctl logs` reads them back. The shim, `steward-cat`, writes one event
+per line and holds output until the channel's session is listening, which
+covers a first sign-in. `stewctl logs` and `status` read a unit's events
+with an XPath on the `unit` field, newest first for a tail and by
+subscription for `-f`, and never through the publisher's metadata, which the
+provider has none of; which of the two places a unit writes to is read off
+its unit file, `StandardOutput=`, so no manager is needed. What is still to
+come is the manager's side: starting the shim in the unit's job, and writing
+its own lines about the unit as events.
 
 ## Control plane
 

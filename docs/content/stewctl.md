@@ -99,7 +99,10 @@ With units, each in detail, then the last ten lines of its log:
 ```
 
 `Main PID` and `Processes` appear while it runs; a timer shows its next
-`Trigger`, what it `Triggers`, and when it `Last` elapsed.
+`Trigger`, what it `Triggers`, and when it `Last` elapsed. The ten lines come
+from wherever the unit's output goes — its file, or for a unit with
+`StandardOutput=eventlog` your Event Log channel, read as [`logs`](#logs)
+reads it.
 
 ## start, stop, restart
 
@@ -202,6 +205,46 @@ emptied in place, since its processes keep writing to the same file, and a
 line written during the copy can be lost. The manager's own log,
 `%LOCALAPPDATA%\steward\steward.log`, is set aside as `steward.log.1` past the
 same size.
+
+### A unit in the Event Log
+
+A unit whose file says `StandardOutput=eventlog` (or `journal`, its name on
+Linux) writes to your Event Log channel instead, `Steward/<your SID>`, one
+event per line. `logs` reads that channel for it, and prints the same thing:
+the lines in order, the manager's lines among them marked `-- <time>
+steward:`, and the channel's name first, on standard error.
+
+```console
+> stewctl logs -n 3 komorebi
+-- Steward/S-1-5-21-2571842103-1957994488-3489912835-1001 for komorebi.service
+-- 2026-09-14 15:34:43.065 steward: active, main process 4242
+2026-09-14T15:34:43.4104 INFO  komorebi::process_command: processing komorebic start
+2026-09-14T15:34:43.5021 INFO  komorebi::window_manager: managing 4 windows
+```
+
+`-n` counts lines here too: the newest N events are read from the end of
+the channel, which costs the same however much it holds. `-f` subscribes to
+the channel and prints each of the unit's events as the Event Log takes it,
+from the last line the tail printed, with nothing repeated or skipped in
+between. The stream a line came from — standard output or standard error —
+is a field of the event, which Event Viewer and `Get-WinEvent` show and
+`logs` does not. If a line says the shim `steward-cat` lost output, it was
+written while nothing was listening to the channel, which happens on an
+account's first sign-in before the channel exists; how much was lost is in
+the line.
+
+`logs` tells the two kinds of unit apart by reading the unit file — the one
+the manager loaded, or the one in `%APPDATA%\steward\units` when no manager
+runs — so it needs no manager for either. It reads the channel with
+`EvtQuery` and `EvtRender` only. steward's provider has no message file, so
+`wevtutil gp` and `Get-WinEvent` complain about that on every call; `logs`
+never goes through the part that complains. What a channel holds is bounded
+by its size, 64 MiB unless an administrator changes it, which is roughly
+50,000 lines for all of your units together; there is no `.log.1`.
+
+Until your channel exists, `logs` says so and exits 1. A task creates it at
+sign-in; on the first sign-in after an install that is a few seconds after
+the manager has started, and from then on it is there before the manager is.
 
 ## verify
 

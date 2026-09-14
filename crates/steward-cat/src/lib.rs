@@ -55,8 +55,8 @@ impl Stream {
     /// The `stream` field's value.
     pub fn name(self) -> &'static str {
         match self {
-            Stream::Stdout => "stdout",
-            Stream::Stderr => "stderr",
+            Stream::Stdout => steward_eventlog::STREAM_STDOUT,
+            Stream::Stderr => steward_eventlog::STREAM_STDERR,
         }
     }
 

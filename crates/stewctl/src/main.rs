@@ -2,18 +2,23 @@
 //!
 //! Everything but `verify` and `logs` asks the running manager, over its
 //! pipe. `logs` asks it where the logs are and which units exist, then reads
-//! the file itself -- falling back to this shell's LOCALAPPDATA when no
-//! manager runs; `verify` needs no manager at all.
+//! the log itself -- the unit's file, or for a unit whose
+//! `StandardOutput=eventlog` the caller's Event Log channel ([`eventlog`]) --
+//! falling back to this shell's LOCALAPPDATA and APPDATA when no manager
+//! runs; `verify` needs no manager at all.
 
-use std::collections::BTreeSet;
+#[cfg(windows)]
+mod eventlog;
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use steward_ipc::{Request, Response, TimerStatus, UnitStatus};
-use steward_unit::{LoadedUnit, Severity};
+use steward_unit::{LoadedUnit, Output, Severity};
 
 /// Everything stewctl prints goes through this rather than std's `println!`,
 /// which panics when the reader has gone -- `stewctl logs whkd | Select-Object
@@ -338,13 +343,56 @@ fn status(units: Vec<String>) -> Outcome {
         }
         print_unit(unit);
         println!();
-        if let Some(dir) = &log_dir {
-            for line in tail(&dir.join(format!("{}.log", unit.name)), 10) {
-                println!("{line}");
-            }
+        // Where its output goes is in its unit file, at the path the manager
+        // loaded it from.
+        let lines = match output_of(Path::new(&unit.path)) {
+            Output::EventLog => channel_tail(&unit.name, 10),
+            Output::File => match &log_dir {
+                Some(dir) => tail(&dir.join(format!("{}.log", unit.name)), 10),
+                None => Vec::new(),
+            },
+        };
+        for line in lines {
+            println!("{line}");
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Where a unit's output goes, read off its unit file: the file, if there
+/// is no unit file or it does not say.
+fn output_of(unit_file: &Path) -> Output {
+    steward_unit::load_file(unit_file.to_path_buf())
+        .parsed
+        .service
+        .map(|s| s.standard_output)
+        .unwrap_or_default()
+}
+
+/// The last `n` lines of an eventlog unit's log, for `status`: what can
+/// be read, and a line saying why when nothing can.
+#[cfg(windows)]
+fn channel_tail(unit: &str, n: usize) -> Vec<String> {
+    let read = || -> Result<Vec<String>, String> {
+        let reader = channel_reader(unit)?;
+        let (lines, _) = reader
+            .tail(n)
+            .map_err(|e| eventlog::describe(reader.channel(), &e))?;
+        Ok(lines)
+    };
+    read().unwrap_or_else(|message| vec![format!("-- {message}")])
+}
+
+#[cfg(not(windows))]
+fn channel_tail(_unit: &str, _n: usize) -> Vec<String> {
+    Vec::new()
+}
+
+/// A reader of `unit`'s events in this user's channel.
+#[cfg(windows)]
+fn channel_reader(unit: &str) -> Result<eventlog::Reader, String> {
+    let sid = steward_ipc::pipe::user_sid().map_err(|e| format!("cannot tell who I am: {e}"))?;
+    eventlog::Reader::new(&sid, unit)
 }
 
 fn print_unit(unit: &UnitStatus) {
@@ -491,7 +539,20 @@ fn is_active(units: Vec<String>) -> Outcome {
 struct LogView {
     dir: PathBuf,
     units: BTreeSet<String>,
+    /// Each unit's file, for those that have one: a log can outlive its
+    /// unit.
+    files: BTreeMap<String, PathBuf>,
     from_manager: bool,
+}
+
+impl LogView {
+    /// Where `unit`'s output goes, by its unit file.
+    fn output(&self, unit: &str) -> Output {
+        self.files
+            .get(unit)
+            .map(|file| output_of(file))
+            .unwrap_or_default()
+    }
 }
 
 /// The running manager's view if there is one -- its log directory is the one
@@ -502,7 +563,12 @@ fn log_view() -> Result<LogView, String> {
         let manager = response.manager.ok_or("steward sent no status")?;
         return Ok(LogView {
             dir: PathBuf::from(manager.log_dir),
-            units: response.units.into_iter().map(|u| u.name).collect(),
+            units: response.units.iter().map(|u| u.name.clone()).collect(),
+            files: response
+                .units
+                .into_iter()
+                .map(|u| (u.name, PathBuf::from(u.path)))
+                .collect(),
             from_manager: true,
         });
     }
@@ -510,7 +576,8 @@ fn log_view() -> Result<LogView, String> {
         .ok_or("steward is not running and LOCALAPPDATA is not set")?;
     let dir = PathBuf::from(local).join("steward").join("logs");
     let mut units = BTreeSet::new();
-    let names = |d: &std::path::Path, suffix: &str| -> Vec<String> {
+    let mut files = BTreeMap::new();
+    let names = |d: &Path, suffix: &str| -> Vec<String> {
         std::fs::read_dir(d)
             .into_iter()
             .flatten()
@@ -520,15 +587,16 @@ fn log_view() -> Result<LogView, String> {
     };
     units.extend(names(&dir, ".log"));
     if let Some(unit_dir) = steward_unit::user_unit_dir() {
-        units.extend(
-            names(&unit_dir, ".service")
-                .into_iter()
-                .map(|n| n + ".service"),
-        );
+        for name in names(&unit_dir, ".service") {
+            let unit = name + ".service";
+            files.insert(unit.clone(), unit_dir.join(&unit));
+            units.insert(unit);
+        }
     }
     Ok(LogView {
         dir,
         units,
+        files,
         from_manager: false,
     })
 }
@@ -673,13 +741,16 @@ fn logs(unit: &str, lines: usize, follow: bool) -> Outcome {
         }
         return Err(message);
     }
-    let path = view.dir.join(format!("{unit}.log"));
     // On stderr, so that the output itself can be piped clean.
     let note = if view.from_manager {
         ""
     } else {
         " (steward is not running)"
     };
+    if view.output(unit) == Output::EventLog {
+        return channel_logs(unit, lines, follow, note);
+    }
+    let path = view.dir.join(format!("{unit}.log"));
     eprintln!("-- {}{note}", path.display());
     if !path.exists() {
         if !follow {
@@ -725,6 +796,40 @@ fn logs(unit: &str, lines: usize, follow: bool) -> Outcome {
             }
         }
     }
+}
+
+/// `logs` for a unit whose output goes to the caller's Event Log channel:
+/// the last `lines` of it, and with `follow` everything after, as it
+/// arrives. The manager is not involved, and the channel outlives it.
+#[cfg(windows)]
+fn channel_logs(unit: &str, lines: usize, follow: bool, note: &str) -> Outcome {
+    let reader = channel_reader(unit)?;
+    eprintln!("-- {} for {unit}{note}", reader.channel());
+    let (tail, newest) = reader
+        .tail(lines)
+        .map_err(|e| eventlog::describe(reader.channel(), &e))?;
+    if tail.is_empty() && newest.is_none() {
+        if !follow {
+            return Err(format!("{unit} has no log yet"));
+        }
+        eprintln!("-- no log yet; waiting for one");
+    }
+    for line in tail {
+        println!("{line}");
+    }
+    if !follow {
+        return Ok(ExitCode::SUCCESS);
+    }
+    // Following ends with the reader, through `println!`, not never.
+    match reader.follow(newest, |line| println!("{line}")) {
+        Ok(never) => match never {},
+        Err(e) => Err(eventlog::describe(reader.channel(), &e)),
+    }
+}
+
+#[cfg(not(windows))]
+fn channel_logs(_unit: &str, _lines: usize, _follow: bool, _note: &str) -> Outcome {
+    Err("steward runs only on Windows".into())
 }
 
 // ---- verify ----------------------------------------------------------------

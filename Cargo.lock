@@ -247,8 +247,10 @@ name = "stewctl"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "steward-eventlog",
  "steward-ipc",
  "steward-unit",
+ "windows-sys",
 ]
 
 [[package]]

@@ -104,5 +104,6 @@ separators in it.
 | `%APPDATA%\steward\units\` | Your units: `*.service`, `*.target`, `*.timer`. |
 | `%LOCALAPPDATA%\steward\steward.log` | The manager's own log; set aside as `steward.log.1` past 8 MiB. |
 | `%LOCALAPPDATA%\steward\logs\<unit>.log` | Each unit's output and steward's lines about it; set aside as `<unit>.log.1` past 8 MiB, at a start or during the run. |
+| Event Log channel `Steward/<your SID>` | The same, for a unit with `StandardOutput=eventlog`: one event per line, 64 MiB for all of your units, oldest overwritten. Read by `stewctl logs`, Event Viewer or `Get-WinEvent`. |
 | `%LOCALAPPDATA%\steward\state-<session>.json` | The session's processes, units at rest, active targets and timer schedules. Removed once a stop of everything completes. |
 | `%LOCALAPPDATA%\steward\timers\<unit>` | When a `Persistent=` timer last elapsed. Per user, so it survives sign-out. |
