@@ -63,15 +63,26 @@ pub fn channel_access(sid: &str) -> String {
 /// names the binary that did the registering rather than a resource DLL that
 /// would have to be built and shipped for the sake of a required attribute.
 ///
-/// Two things are known about that path from importing one of these for
-/// real (2026-09-14). `wevtutil im` says "Failed to load resource" for a
-/// binary with no compiled `WEVT_TEMPLATE` in it, and imports it anyway --
-/// the channel is created and events reach it. But the Event Log service,
-/// which runs as `NT SERVICE\EventLog`, reads that path itself, and if it
-/// cannot, `wevtutil gp` on the provider fails with "Access is denied" and
-/// `Get-WinEvent` writes an error for every call even as it returns the
-/// events. So the path must be one that service can read: under `C:\Program
-/// Files`, where steward installs, and not under a user's profile.
+/// What that costs is known from importing one of these for real
+/// (2026-09-14), and it is worth stating plainly because it is visible to
+/// anyone who goes looking at the channel.
+///
+/// `wevtutil im` prints "Failed to load resource" for a binary with no
+/// resource section, and imports it anyway: the channel is created, the
+/// provider is registered, events reach it and come back out with their
+/// fields intact. But `wevtutil gp` on the provider then fails with "The
+/// specified image file did not contain a resource section", and
+/// `Get-WinEvent` writes that as a non-terminating error on every call even
+/// as it returns the events and their XML. A Rust binary carries no resource
+/// section, and only one built with a `WEVT_TEMPLATE` or a message resource
+/// would quiet it; `mc.exe` is a Windows SDK tool, and steward cross-builds
+/// on Linux.
+///
+/// Two separate things, often confused. The path must also be readable by
+/// the Event Log service itself, which runs as `NT SERVICE\EventLog`: a path
+/// under a user's profile gives "Access is denied" instead, which is a
+/// different fault with the same symptom. `C:\Program Files\steward`, where
+/// steward installs, settles that one and not the other.
 ///
 /// Sorted and deduplicated, so that the same set of users gives the same
 /// bytes however they were enumerated: that is what lets the caller decide

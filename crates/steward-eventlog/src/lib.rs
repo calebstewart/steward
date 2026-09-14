@@ -49,23 +49,27 @@ pub const CHANNEL_KEYWORD: u64 = 0;
 /// overwritten.
 ///
 /// Windows' own default for a channel a manifest does not say, 1 MiB, is far
-/// too small, so this says. 32 MiB rather than the 8 MiB a unit's log file
-/// may reach today (`steward::log::CAP`), for two reasons that both point
-/// the same way:
+/// too small, so this says. 32 MiB, against the 8 MiB a unit's log file may
+/// reach today (`steward::log::CAP`), and it still keeps less output than
+/// the file does. Two things pull against each other here:
 ///
-/// - the 8 MiB is *per unit*, and the channel is per user, so one channel
-///   holds what every one of that user's units used to have a file for;
-/// - a channel does not hold its size in output. Measured on a real channel
-///   (2026-09-14): the Event Log keeps strings as UTF-16 and spends about a
-///   kilobyte of record around each one, so 8 MiB of channel came to 3 to 4
-///   MB of ASCII.
+/// - the 8 MiB is *per unit*, and a channel is per user, so one channel
+///   stands in for every file every one of that user's units had;
+/// - a channel holds far less than its size in output. Measured on a real
+///   channel with the shim's encoding (2026-09-14): the `.evtx` costs about
+///   5.4x the text for 4 KiB events, 6 to 8x for larger ones, and 8 to 9x
+///   for line-sized ones, the Event Log keeping strings as UTF-16 and
+///   spending a record's worth of structure on each. So 32 MiB comes to
+///   roughly 4 to 6 MB of output.
 ///
-/// So 32 MiB is roughly the two 8 MiB generations a single unit's file keeps
-/// today, shared out among a user's units, rather than a rise in what is
-/// kept. An administrator can say otherwise -- `wevtutil sl Steward/<SID>
-/// /ms:<bytes>` -- but only until the next import, which is to say until
-/// somebody signs in who has never signed in before; this is the number that
-/// comes back.
+/// Parity with the file is therefore not on offer: matching a handful of
+/// units at 8 MiB each would want hundreds of megabytes per user, in
+/// `%SystemRoot%\System32\Winevt\Logs`, on every machine. 32 MiB is the
+/// judgement that a few megabytes of recent output, structured and
+/// queryable, beats more of it in a flat file. An administrator can say
+/// otherwise -- `wevtutil sl Steward/<SID> /ms:<bytes>` -- but only until
+/// the next import, which is to say until somebody signs in who never has
+/// before; this is the number that comes back.
 pub const CHANNEL_MAX_SIZE: u64 = 32 << 20;
 
 /// The provider that owns `sid`'s channel: `Steward-<SID>`.

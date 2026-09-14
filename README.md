@@ -204,6 +204,12 @@ the channels' resource file, which the Event Log service reads as itself
 and getting it wrong makes `wevtutil gp` and `Get-WinEvent` complain about
 access on every call even though the events still arrive.
 
+Expect one complaint even when it is right. steward carries no resource
+section, having no compiled event templates to put in one, so `wevtutil gp`
+says so and `Get-WinEvent` repeats it as a non-terminating error while
+returning the events and their fields regardless. Nothing is lost by it;
+`stewctl logs` will not go through either of those.
+
 The task takes no arguments and does
 the same thing every time, so it is registered with a descriptor that lets
 users run it but not change it -- it runs as SYSTEM, and a user who could
