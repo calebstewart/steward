@@ -15,7 +15,7 @@
 //! one is a superset. That is what makes each import additive, and what
 //! leaves the uninstall a single file naming everything to remove.
 
-use crate::{channel_name, is_sid, provider_guid, provider_name, CHANNEL_MAX_SIZE, CHANNEL_VALUE};
+use crate::{channel_name, is_sid, provider_guid, provider_name, ChannelSize, CHANNEL_VALUE};
 
 const HEADER: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!-- Written by `steward provision-eventlog`; edits are lost at the next logon.
@@ -55,7 +55,8 @@ pub fn channel_access(sid: &str) -> String {
     format!("O:BAG:SYD:(A;;0xf0007;;;SY)(A;;0x7;;;BA)(A;;0x3;;;{sid})")
 }
 
-/// The manifest declaring a provider and a channel for each of `sids`.
+/// The manifest declaring a provider and a channel for each of `sids`, each
+/// channel `size` bytes at most.
 ///
 /// `resource_file` is the path the manifest names as each provider's
 /// resource and message file. The schema requires both, and no provider or
@@ -97,7 +98,14 @@ pub fn channel_access(sid: &str) -> String {
 /// bytes however they were enumerated: that is what lets the caller decide
 /// there is nothing to import by comparing what it would write against what
 /// is already on disk. A SID that is not [`is_sid`] is dropped.
-pub fn manifest(sids: &[String], resource_file: &str) -> String {
+///
+/// The size is in here because an import sets it: on the channels it
+/// creates, and on the ones already there, whatever they had been set to
+/// since. It is not a reason to import: a manifest that
+/// differs from the last only in its size (see [`size_in`]) is written and
+/// not imported, and the caller sets the size on each channel as it does
+/// the access descriptor.
+pub fn manifest(sids: &[String], resource_file: &str, size: ChannelSize) -> String {
     let mut sids: Vec<&str> = sids
         .iter()
         .map(String::as_str)
@@ -139,7 +147,7 @@ pub fn manifest(sids: &[String], resource_file: &str) -> String {
             channel = channel_name(sid),
             value = CHANNEL_VALUE,
             access = channel_access(sid),
-            size = CHANNEL_MAX_SIZE,
+            size = size.bytes(),
         ));
     }
     out.push_str(FOOTER);
@@ -164,6 +172,19 @@ pub fn sids_in(manifest: &str) -> Vec<String> {
             is_sid(sid).then(|| sid.to_string())
         })
         .collect()
+}
+
+/// The size a manifest gives its channels, if it names one that
+/// [`ChannelSize`] would.
+///
+/// The first channel's, since a manifest [`manifest`] wrote gives every
+/// channel the same. What the caller does with it is ask whether the
+/// manifest on disk is what it would write now at *that* size -- if so, only
+/// the size has changed, which needs no import.
+pub fn size_in(manifest: &str) -> Option<ChannelSize> {
+    let (_, rest) = manifest.split_once("<maxSize>")?;
+    let (bytes, _) = rest.split_once("</maxSize>")?;
+    ChannelSize::from_bytes(bytes.parse().ok()?).ok()
 }
 
 /// A SID as a C identifier, for the `symbol` and `chid` a manifest gives a
@@ -199,8 +220,16 @@ mod tests {
     const TWO: &str = "S-1-5-21-2571842103-1957994488-3489912835-1002";
     const EXE: &str = r"C:\Program Files\steward\steward.exe";
 
+    fn owned(sids: &[&str]) -> Vec<String> {
+        sids.iter().map(|s| s.to_string()).collect()
+    }
+
     fn of(sids: &[&str]) -> String {
-        manifest(&sids.iter().map(|s| s.to_string()).collect::<Vec<_>>(), EXE)
+        manifest(&owned(sids), EXE, ChannelSize::DEFAULT)
+    }
+
+    fn sized(sids: &[&str], size: &str) -> String {
+        manifest(&owned(sids), EXE, size.parse().unwrap())
     }
 
     /// What the caller writes to disk and hands `wevtutil im`: one provider
@@ -217,7 +246,7 @@ mod tests {
         assert!(text.contains("type=\"Operational\""));
         assert!(text.contains("isolation=\"Custom\""));
         assert!(text.contains(&format!("access=\"{}\"", channel_access(ONE))));
-        assert!(text.contains(&format!("<maxSize>{CHANNEL_MAX_SIZE}</maxSize>")));
+        assert!(text.contains("<maxSize>67108864</maxSize>"));
         assert!(text.contains(&format!("resourceFileName=\"{EXE}\"")));
         // TraceLogging: channels only.
         assert!(!text.contains("<template"));
@@ -279,12 +308,54 @@ mod tests {
         let first = of(&[ONE]);
         let mut sids = sids_in(&first);
         sids.push(TWO.to_string());
-        let second = manifest(&sids, EXE);
+        let second = manifest(&sids, EXE, ChannelSize::DEFAULT);
         // Additive: everything the first declared, the second still does.
         assert!(second.contains(&format!("<channel name=\"Steward/{ONE}\"")));
         assert!(second.contains(&format!("<channel name=\"Steward/{TWO}\"")));
         // And ONE alone, signed out, is still there the run after.
-        assert_eq!(sids_in(&manifest(&sids_in(&second), EXE)), vec![ONE, TWO]);
+        assert_eq!(
+            sids_in(&manifest(&sids_in(&second), EXE, ChannelSize::DEFAULT)),
+            vec![ONE, TWO]
+        );
+    }
+
+    /// Every channel gets the size asked for, and it is the one thing that
+    /// differs between two manifests at two sizes.
+    #[test]
+    fn every_channel_is_the_size_asked_for() {
+        let text = sized(&[ONE, TWO], "128MiB");
+        assert_eq!(text.matches("<maxSize>134217728</maxSize>").count(), 2);
+        assert_eq!(text.matches("<maxSize>").count(), 2);
+        assert_eq!(text.replace("134217728", "67108864"), of(&[ONE, TWO]));
+    }
+
+    /// The size reads back out as it went in, and a file that names none,
+    /// or one steward would not have written, reads as none.
+    #[test]
+    fn the_size_reads_back() {
+        for size in ["1028KiB", "64MiB", "100000000", "3GiB"] {
+            assert_eq!(size_in(&sized(&[ONE], size)), Some(size.parse().unwrap()));
+        }
+        assert_eq!(size_in(&of(&[])), None);
+        assert_eq!(size_in(""), None);
+        assert_eq!(size_in("<maxSize>1048576</maxSize>"), None);
+        assert_eq!(size_in("<maxSize>lots</maxSize>"), None);
+        assert_eq!(size_in("<maxSize>67108864"), None);
+    }
+
+    /// The question the caller asks of the file on disk -- is it what I
+    /// would write now, at the size it already has? -- answered yes only
+    /// when the size is all that changed.
+    #[test]
+    fn a_change_of_size_alone_is_told_apart() {
+        let before = of(&[ONE]);
+        let was = size_in(&before).unwrap();
+        // Resized: the same users at the old size are the old bytes.
+        assert_eq!(manifest(&owned(&[ONE]), EXE, was), before);
+        assert_ne!(sized(&[ONE], "128MiB"), before);
+        // A new user, or a new path, is a change whatever the size.
+        assert_ne!(manifest(&owned(&[ONE, TWO]), EXE, was), before);
+        assert_ne!(manifest(&owned(&[ONE]), r"D:\steward.exe", was), before);
     }
 
     /// Nothing that is not a SID reaches the XML or the SDDL.
@@ -297,6 +368,7 @@ mod tests {
                 ONE.to_string(),
             ],
             EXE,
+            ChannelSize::DEFAULT,
         );
         assert!(!text.contains("<x "));
         assert!(!text.contains("CALEB"));
@@ -306,7 +378,11 @@ mod tests {
     /// The one field that can hold a reserved character is escaped.
     #[test]
     fn the_resource_path_is_escaped() {
-        let text = manifest(&[ONE.to_string()], r"C:\a & b\steward.exe");
+        let text = manifest(
+            &[ONE.to_string()],
+            r"C:\a & b\steward.exe",
+            ChannelSize::DEFAULT,
+        );
         assert!(text.contains(r#"resourceFileName="C:\a &amp; b\steward.exe""#));
         assert!(!text.contains("& b"));
     }

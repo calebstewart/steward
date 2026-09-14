@@ -5,11 +5,12 @@
 //!   steward --console    run in the foreground until Ctrl+C (development)
 //!   steward --ctrl-c PID...
 //!                        (internal) deliver Ctrl+C to the consoles of PIDs
-//!   steward provision-eventlog [--uninstall]
-//!                        create the signed-in users' Event Log channels, or
-//!                        remove every channel it has made. Run as SYSTEM by
-//!                        a Scheduled Task at every logon, which the install
-//!                        declares rather than this registering it.
+//!   steward provision-eventlog [--channel-size SIZE | --uninstall]
+//!                        create the signed-in users' Event Log channels,
+//!                        each SIZE at most, or remove every channel it has
+//!                        made. Run as SYSTEM by a Scheduled Task at every
+//!                        logon, which the install declares rather than this
+//!                        registering it.
 //!
 //! Either way the manager is the same code: `manager::run`, fed controls by
 //! the SCM's control handler or the console's Ctrl+C handler.
@@ -43,34 +44,52 @@ fn main() {
             std::process::exit(sys::signal::ctrl_c_helper(&pids));
         }
         Some("provision-eventlog") => {
-            let done = match args.get(1).map(String::as_str) {
-                None if args.len() == 1 => eventlog::provision(),
-                Some("--uninstall") if args.len() == 2 => eventlog::uninstall(),
-                _ => {
-                    eprintln!("usage: steward provision-eventlog [--uninstall]");
-                    eprintln!("  (with no arguments it creates the channels; the Scheduled Task");
-                    eprintln!("   that runs it is declared by the install, not by steward)");
-                    std::process::exit(2);
-                }
+            let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+            let done = match rest[..] {
+                [] => eventlog::provision(Default::default()),
+                ["--channel-size", size] => match size.parse() {
+                    Ok(size) => eventlog::provision(size),
+                    Err(e) => fail(
+                        2,
+                        &format!("steward provision-eventlog: --channel-size: {e}"),
+                    ),
+                },
+                ["--uninstall"] => eventlog::uninstall(),
+                _ => fail(
+                    2,
+                    "usage: steward provision-eventlog [--channel-size SIZE]\n\
+                     \x20      steward provision-eventlog --uninstall\n\
+                     \x20 creates the channels, each SIZE at most (bytes, or KiB, MiB or\n\
+                     \x20 GiB, as in 128MiB; 64MiB if not given). The Scheduled Task that\n\
+                     \x20 runs it is declared by the install, not by steward.",
+                ),
             };
             if let Err(e) = done {
-                // The task's last-run result is how a logon-time failure is
-                // noticed at all, so it must not exit 0 on one. `writeln!`
-                // and not `eprintln!`, which panics when the write fails:
-                // the Task Scheduler leaves a process no standard handles,
-                // and the failure to report a failure should not replace it.
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr(), "steward provision-eventlog: {e}");
-                std::process::exit(1);
+                fail(1, &format!("steward provision-eventlog: {e}"));
             }
         }
         _ => {
             eprintln!("usage: steward [--console | --version]");
-            eprintln!("       steward provision-eventlog [--install | --uninstall]");
+            eprintln!("       steward provision-eventlog [--channel-size SIZE | --uninstall]");
             eprintln!("  (with no arguments steward expects to be started by the SCM)");
             std::process::exit(2);
         }
     }
+}
+
+/// `provision-eventlog`'s way out when it has failed, or was asked wrongly:
+/// said, and a non-zero exit, because the task's last-run result is how a
+/// logon-time failure is noticed at all.
+///
+/// `writeln!` and not `eprintln!`, which panics when the write fails: the
+/// Task Scheduler leaves a process no standard handles, and the failure to
+/// report a failure should not replace it. A task declared with a size
+/// steward refuses gets 2 for its last result rather than a panic's 101.
+#[cfg(windows)]
+fn fail(code: i32, message: &str) -> ! {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{message}");
+    std::process::exit(code)
 }
 
 #[cfg(not(windows))]

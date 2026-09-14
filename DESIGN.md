@@ -280,8 +280,11 @@ machine are not known to the one elevated step that registers the template,
 so the install declares a Scheduled Task as well: `steward
 provision-eventlog`, run as SYSTEM at the logon of any user, which
 regenerates a channels-only manifest from the sessions signed in and imports
-it. It takes no arguments and is idempotent, which is what lets it carry a
-descriptor that users may run but not change. Declared by whatever installs
+it. Its one argument, the size of every channel, is a literal in the task's
+action rather than anything a caller supplies, and it is idempotent -- it
+sets a size or a descriptor that has drifted without re-importing anything
+-- which is what lets it carry a descriptor that users may run but not
+change. Declared by whatever installs
 steward -- `windows.scheduledTasks`, or the README's by-hand steps -- and not
 registered by steward itself, for the same reason the service is: a task
 winpkgs owns is deleted again when steward leaves a configuration, where a
