@@ -10,7 +10,15 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
+pub mod channel;
+#[cfg(windows)]
 pub mod pipe;
+
+/// [`UnitStatus::output`] for a unit whose output goes to the user's Event
+/// Log channel.
+pub const OUTPUT_EVENTLOG: &str = "eventlog";
+/// [`UnitStatus::output`] for a unit whose output goes to its log file.
+pub const OUTPUT_FILE: &str = "file";
 
 /// The most a request or response may be, in bytes.
 pub const MAX_MESSAGE: u64 = 4 << 20;
@@ -105,12 +113,20 @@ pub struct UnitStatus {
     /// A timer's schedule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timer: Option<TimerStatus>,
-    /// Set for a `StandardOutput=eventlog` unit whose output goes to its log
-    /// file for this run instead of the channel, and why: its `steward-cat`
-    /// could not be started, or exited with the unit still running. `stewctl`
-    /// reads the file rather than the channel while this is set.
+    /// Set for a unit whose output was to go to the Event Log channel but goes
+    /// to its log file for this run instead, and why: its `steward-cat` could
+    /// not be started, or exited with the unit still running. `stewctl` reads
+    /// the file rather than the channel while this is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_fallback: Option<String>,
+    /// Where its output goes, [`OUTPUT_EVENTLOG`] or [`OUTPUT_FILE`]: what its
+    /// unit file says, or, where it says nothing, what the manager found on
+    /// this machine -- the channel if there is one, or if the provisioning
+    /// task could be run to make it, and the file otherwise. `stewctl` reads
+    /// this rather than deciding again. Absent from a manager from before the
+    /// Event Log was the default, which only ever used what the file said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

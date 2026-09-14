@@ -107,9 +107,15 @@ fn wevtutil() -> PathBuf {
 ///
 /// Restarting the Event Log service clears it: after `Restart-Service
 /// EventLog`, the same channel imported, listed and took events at once
-/// (2026-09-14). Nothing here restarts it -- that would stop every service
-/// that depends on it -- so the run says which channel, and an
-/// administrator decides.
+/// (2026-09-14). Not always by itself: later that day a channel removed and
+/// imported again under the same name hit it, the service logged event 22
+/// for it at the restart, and imports after the restart still gave 4201; it
+/// came back only when it was removed (`um`) and imported again (#28).
+/// Nothing here restarts the service -- that would stop every service that
+/// depends on it -- so the run says which channel, and an administrator
+/// decides. The manager, for its part, finds nothing listening to such a
+/// channel and sends the output of units that did not ask for it to their
+/// files.
 const NOT_ENABLED: i32 = 4201;
 
 /// `wevtutil` ran and failed. Its exit code is a Win32 error code, kept so
@@ -158,6 +164,66 @@ fn run(args: &[&str]) -> io::Result<String> {
             ),
         }))
     }
+}
+
+/// Start the provisioning task now, as the manager does when it finds its
+/// user's channel missing: `schtasks /run`, which any signed-in user may do
+/// to this task (its descriptor grants them execute) and which runs it as
+/// SYSTEM, exactly as its logon trigger would. Returns once the task has
+/// been started, not once it has finished; the shims are what wait for the
+/// channel. An error means the task could not be started, which almost
+/// always means that nothing installed it.
+///
+/// A second run while one is going is queued behind it by the task's own
+/// settings, so racing the logon trigger costs one run that finds nothing
+/// to do.
+pub fn run_task() -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    // No console: the manager has none to lend it, and a console program
+    // started without this flag would get a window of its own on the
+    // user's desktop.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let mut child = Command::new(system_root().join("System32").join("schtasks.exe"))
+        .args(["/run", "/tn", steward_eventlog::PROVISION_TASK])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()?;
+    // The manager's one thread waits on this, so not for ever: it takes a
+    // few tens of milliseconds, and a Task Scheduler that does not answer
+    // in seconds is not going to make a channel either.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "schtasks did not answer in 5 s",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let said = String::from_utf8_lossy(&output.stderr);
+    let said: Vec<&str> = said
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    Err(io::Error::other(format!(
+        "schtasks /run /tn {} failed ({}){}{}",
+        steward_eventlog::PROVISION_TASK,
+        output.status,
+        if said.is_empty() { "" } else { ": " },
+        said.join(" ")
+    )))
 }
 
 /// What a run did, in the order it did it.

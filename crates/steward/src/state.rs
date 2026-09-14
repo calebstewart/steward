@@ -160,7 +160,7 @@ pub struct SavedUnit {
     pub main: Option<SavedProcess>,
     /// Every process in the job when it was last saved, the main one included.
     pub processes: Vec<SavedProcess>,
-    /// A `StandardOutput=eventlog` unit whose output goes to its file for
+    /// A unit whose output was to go to the channel but goes to its file for
     /// this run, and why: the `steward-cat` could not be started. The next
     /// manager's status says so too, rather than claiming the channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]

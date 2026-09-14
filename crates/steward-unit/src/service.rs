@@ -130,11 +130,16 @@ pub enum KillMode {
 }
 
 /// Where a service's standard output and error go: `StandardOutput=`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// A unit that does not say has no `Output` ([`Service::standard_output`] is
+/// `None`). Its output goes to the Event Log channel on a machine that has
+/// one and to its file on a machine that does not, and only the program
+/// running it can tell which machine it is on, so the parser leaves the
+/// choice open rather than guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Output {
     /// `%LOCALAPPDATA%\steward\logs\<unit>.log`, through an inherited
-    /// handle: the default, and always safe.
-    #[default]
+    /// handle: always there, whatever the machine has.
     File,
     /// The user's Event Log channel, `Steward/<SID>`, through a
     /// `steward-cat` shim the manager starts for the unit.
@@ -185,9 +190,10 @@ pub struct Service {
     pub working_directory: Option<String>,
     pub environment: Vec<(String, String)>,
     pub kill_mode: KillMode,
-    /// Where its output goes. Its error stream goes with it: there is no
+    /// Where its output goes, if the unit says; `None` if it does not (see
+    /// [`Output`]). Its error stream goes with it: there is no
     /// `StandardError=`.
-    pub standard_output: Output,
+    pub standard_output: Option<Output>,
 
     /// A timer's `[Timer]` section; `None` for anything else.
     pub timer: Option<Timer>,
@@ -237,7 +243,7 @@ impl Service {
             working_directory: None,
             environment: Vec::new(),
             kill_mode: KillMode::ControlGroup,
-            standard_output: Output::File,
+            standard_output: None,
             timer: (kind == UnitKind::Timer).then(|| Timer::new(name)),
             wanted_by: Vec::new(),
         }
@@ -456,16 +462,19 @@ impl Reader {
             }
             "StandardOutput" => {
                 s.standard_output = match e.value.as_str() {
-                    "file" | "" => Output::File,
+                    // Empty is systemd's way of undoing an earlier line: the
+                    // default again, whatever this machine's is.
+                    "" => None,
+                    "file" => Some(Output::File),
                     // `journal` is what a unit written for Linux says, and
                     // the Event Log is what it means here.
-                    "eventlog" | "journal" => Output::EventLog,
+                    "eventlog" | "journal" => Some(Output::EventLog),
                     other => {
                         self.warn(
                             e.line,
                             format!("StandardOutput={other} is not supported; treated as file"),
                         );
-                        Output::File
+                        Some(Output::File)
                     }
                 }
             }
@@ -996,26 +1005,32 @@ WantedBy=graphical-session.target
         );
     }
 
-    /// `StandardOutput=eventlog` sends output to the user's channel; unset,
-    /// `file` and anything this cannot do mean the file, the last with a
-    /// warning. `journal` is the same choice under its Linux name.
+    /// `StandardOutput=eventlog` sends output to the user's channel, and
+    /// `journal` is the same choice under its Linux name; `file` and
+    /// anything this cannot do mean the file, the last with a warning.
+    /// Unset, or set to nothing, leaves it to the machine.
     #[test]
     fn where_the_output_goes() {
         let with = |value: &str| format!("[Service]\nExecStart=x.exe\nStandardOutput={value}\n");
+        assert_eq!(ok("[Service]\nExecStart=x.exe\n").standard_output, None);
+        assert_eq!(ok(&with("")).standard_output, None);
         assert_eq!(
-            ok("[Service]\nExecStart=x.exe\n").standard_output,
-            Output::File
+            ok(&with("eventlog")).standard_output,
+            Some(Output::EventLog)
         );
-        assert_eq!(ok(&with("eventlog")).standard_output, Output::EventLog);
-        assert_eq!(ok(&with("journal")).standard_output, Output::EventLog);
-        assert_eq!(ok(&with("file")).standard_output, Output::File);
+        assert_eq!(ok(&with("journal")).standard_output, Some(Output::EventLog));
+        assert_eq!(ok(&with("file")).standard_output, Some(Output::File));
         assert_eq!(
             ok(&(with("eventlog") + "StandardOutput=file\n")).standard_output,
-            Output::File
+            Some(Output::File)
+        );
+        assert_eq!(
+            ok(&(with("file") + "StandardOutput=\n")).standard_output,
+            None
         );
         let parsed = parse_service("t.service", &with("null"));
         assert!(!parsed.has_errors());
-        assert_eq!(parsed.service.unwrap().standard_output, Output::File);
+        assert_eq!(parsed.service.unwrap().standard_output, Some(Output::File));
         assert_eq!(
             messages(&with("null")),
             ["line 3: warning: StandardOutput=null is not supported; treated as file"]

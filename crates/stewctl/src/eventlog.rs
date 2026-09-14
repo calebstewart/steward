@@ -1,5 +1,5 @@
 //! A unit's output read back out of the user's Event Log channel: what
-//! `logs` and `status` do for a unit whose `StandardOutput=eventlog`.
+//! `logs` and `status` do for a unit whose output goes there.
 //!
 //! The channel is `Steward/<SID>` for the SID this process runs as, so no
 //! manager is asked anything. The events are the shim's ([`steward_cat`] is
@@ -17,7 +17,8 @@ use std::io;
 use std::ptr::null;
 
 use steward_eventlog::{
-    channel_name, FIELD_BYTES, FIELD_DROPPED, FIELD_STREAM, FIELD_UNIT, STREAM_STEWARD,
+    channel_name, FIELD_BYTES, FIELD_DROPPED, FIELD_STREAM, FIELD_UNIT, PERCENT_STAND_IN,
+    STREAM_STEWARD,
 };
 use windows_sys::core::PCWSTR;
 use windows_sys::Win32::Foundation::{
@@ -88,11 +89,12 @@ pub fn xpath_literal(text: &str) -> Option<String> {
     }
 }
 
-/// The events that are `unit`'s: those whose `unit` field says so.
+/// The events that are `unit`'s: those whose `unit` field says so -- as
+/// the writer put it there, with any `%` as [`PERCENT_STAND_IN`].
 fn query_for(unit: &str) -> Option<String> {
     Some(format!(
         "*[EventData[Data[@Name='{FIELD_UNIT}']={}]]",
-        xpath_literal(unit)?
+        xpath_literal(&unit.replace('%', &PERCENT_STAND_IN.to_string()))?
     ))
 }
 
@@ -292,9 +294,9 @@ impl Reader {
         };
         Ok(match (bytes, dropped) {
             (Value::String(text), _) if stream == STREAM_STEWARD => {
-                Some(format!("-- {time} steward: {text}"))
+                Some(format!("-- {time} steward: {}", unescape(text)))
             }
-            (Value::String(text), _) => Some(text.clone()),
+            (Value::String(text), _) => Some(unescape(text)),
             (_, Value::UInt64(lost)) => Some(format!(
                 "-- {time} steward-cat: {lost} bytes of {stream} were lost while no session was \
                  listening to the channel"
@@ -302,6 +304,13 @@ impl Reader {
             _ => None,
         })
     }
+}
+
+/// A line as the program wrote it: the writer puts each `%` in the channel
+/// as [`PERCENT_STAND_IN`], since the Event Log cannot render most events
+/// with a `%` in them, and this puts it back.
+fn unescape(text: &str) -> String {
+    text.replace(PERCENT_STAND_IN, "%")
 }
 
 /// Newest first is how they were read; oldest first is how they are shown.
@@ -417,6 +426,22 @@ fn local_time(filetime: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The writer puts each `%` in the channel as the fullwidth sign; the
+    /// reader turns it back, and looks for a unit's name the way it was
+    /// written.
+    #[test]
+    fn percent_comes_back() {
+        assert_eq!(
+            unescape("100\u{ff05} done, GET /a\u{ff05}20b"),
+            "100% done, GET /a%20b"
+        );
+        assert_eq!(unescape("no percent"), "no percent");
+        assert_eq!(
+            query_for("a%b.service").as_deref(),
+            Some("*[EventData[Data[@Name='unit']='a\u{ff05}b.service']]")
+        );
+    }
 
     #[test]
     fn xpath_literals() {

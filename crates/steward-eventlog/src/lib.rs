@@ -79,6 +79,24 @@ pub const STREAM_STDERR: &str = "stderr";
 /// See [`EVENT_OUTPUT`].
 pub const STREAM_STEWARD: &str = "steward";
 
+/// What a `%` in a line becomes in the channel: U+FF05 FULLWIDTH PERCENT
+/// SIGN, which `stewctl logs` turns back into `%`.
+///
+/// The Event Log reads a `%` in a TraceLogging string as the start of an
+/// insertion when it renders the event. `%%`, `%1` to `%99` and a `%` at
+/// the very end pass; a `%` followed by anything else -- `100% done`, the
+/// `%20` of a URL, `%s`, `%n`, `%100` -- makes the whole event render with
+/// every field empty, through `EvtRender`, `Get-WinEvent` and Event
+/// Viewer alike, although the `.evtx` holds the text intact (seen,
+/// 2026-09-14, #28). Doubling it is no escape: `%%` stays `%%` in the
+/// event's values and XML, and the message Event Viewer's General tab
+/// shows comes back empty for any line with a `%` in it, doubled or not.
+/// The fullwidth sign renders on every path, reads as a percent sign in
+/// Event Viewer, and is one UTF-16 unit, so a line's length is unchanged.
+/// A fullwidth sign the program itself wrote comes back from `stewctl` as
+/// `%` too; that is the one thing this costs.
+pub const PERCENT_STAND_IN: char = '\u{FF05}';
+
 /// The provider that owns `sid`'s channel: `Steward-<SID>`.
 ///
 /// A name rather than only a GUID because Windows' own tools take a provider
@@ -94,6 +112,28 @@ pub fn provider_name(sid: &str) -> String {
 pub fn channel_name(sid: &str) -> String {
     format!("Steward/{sid}")
 }
+
+/// Where Windows keeps `sid`'s channel's configuration, under
+/// `HKEY_LOCAL_MACHINE`: the key exists exactly while the channel is
+/// registered -- an import creates it, `wevtutil um` removes it -- and any
+/// user may read it. So it is how a program that is not an administrator,
+/// the manager or `stewctl`, asks whether the channel is there, without the
+/// Event Log API and without opening the channel.
+pub fn channel_key(sid: &str) -> String {
+    format!(
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\WINEVT\Channels\{}",
+        channel_name(sid)
+    )
+}
+
+/// The Scheduled Task that runs `steward provision-eventlog` as SYSTEM at
+/// every logon, as the install declares it: `windows.scheduledTasks` in
+/// `nix/winpkgs/system.nix`, or the README's by-hand steps. Its descriptor
+/// lets any signed-in user run it, and the manager does, when it finds its
+/// user's channel missing, rather than wait for the logon trigger; so the
+/// name is shared between whatever declares the task and the manager that
+/// runs it.
+pub const PROVISION_TASK: &str = "steward-provision-eventlog";
 
 /// The provider GUID for `sid`, derived from [`provider_name`].
 pub fn provider_guid(sid: &str) -> Guid {
@@ -271,6 +311,15 @@ mod tests {
         assert_eq!(channel_name(one), format!("Steward/{one}"));
         assert_eq!(provider_guid(one), provider_guid(one));
         assert_ne!(provider_guid(one), provider_guid(two));
+    }
+
+    #[test]
+    fn a_channel_is_found_where_windows_keeps_it() {
+        let sid = "S-1-5-21-2571842103-1957994488-3489912835-1001";
+        assert_eq!(
+            channel_key(sid),
+            format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\WINEVT\Channels\Steward/{sid}")
+        );
     }
 
     /// `to_u128` reads the bytes in the order `Display` writes them.

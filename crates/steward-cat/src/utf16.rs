@@ -10,11 +10,17 @@
 //! The fields are nul-terminated: a counted string makes the Event Log add a
 //! `<field>_Length` element beside each one. A NUL ends a line before it gets
 //! here ([`crate::lines`]); one that did would become U+2400 SYMBOL FOR NULL
-//! rather than end the field. Bytes that are not UTF-8 become U+FFFD, as
-//! `String::from_utf8_lossy` would have it.
+//! rather than end the field. A `%` becomes U+FF05 FULLWIDTH PERCENT SIGN,
+//! since the Event Log renders most events with a `%` in them as empty
+//! ([`steward_eventlog::PERCENT_STAND_IN`]). Bytes that are not UTF-8 become
+//! U+FFFD, as `String::from_utf8_lossy` would have it.
 
 /// What a NUL in the output becomes.
 pub const NUL: u16 = 0x2400;
+
+/// What a `%` becomes: [`steward_eventlog::PERCENT_STAND_IN`], since the
+/// Event Log cannot render most events with a `%` in them.
+pub const PERCENT: u16 = steward_eventlog::PERCENT_STAND_IN as u16;
 
 /// Replaces `out` with `bytes` as nul-terminated UTF-16. Each byte gives at
 /// most one code unit, so `out` needs room for `bytes.len() + 1` and, given
@@ -23,7 +29,11 @@ pub fn encode(bytes: &[u8], out: &mut Vec<u16>) {
     out.clear();
     for chunk in bytes.utf8_chunks() {
         for unit in chunk.valid().encode_utf16() {
-            out.push(if unit == 0 { NUL } else { unit });
+            out.push(match unit {
+                0 => NUL,
+                0x25 => PERCENT,
+                unit => unit,
+            });
         }
         if !chunk.invalid().is_empty() {
             out.push(char::REPLACEMENT_CHARACTER as u16);
@@ -65,6 +75,17 @@ mod tests {
     #[test]
     fn nul_is_shown_not_a_terminator() {
         assert_eq!(text(b"a\0b"), utf16("a\u{2400}b"));
+    }
+
+    /// The Event Log cannot render most events with a `%` in them, so each
+    /// one goes as the fullwidth sign, one unit for one byte as before.
+    #[test]
+    fn percent_is_written_fullwidth() {
+        assert_eq!(
+            text(b"100% done, GET /a%20b%%"),
+            utf16("100\u{ff05} done, GET /a\u{ff05}20b\u{ff05}\u{ff05}")
+        );
+        assert_eq!(cstr("%n"), utf16("\u{ff05}n"));
     }
 
     #[test]

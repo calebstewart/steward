@@ -67,11 +67,16 @@ session.
   `Type=forking`, without a PID file. `KillMode=process` lets children break
   away from the job instead, so they are yours.
 - **Processes are created inside their job**, so nothing escapes in the instant
-  before assignment, and inherit exactly two handles: `NUL` for standard input,
-  and the unit's log for standard output and error.
-- **Output goes to a file, not a pipe.** A manager crash cannot break a
-  service's output — a program writing into a closed pipe can crash — and
-  `stewctl logs` works with no manager at all.
+  before assignment, and inherit only the handles they need: `NUL` for
+  standard input, and for standard output and error either the write ends of
+  two pipes to the unit's shim or the unit's log file.
+- **Output goes to the Event Log, but never through the manager.** Each unit's
+  output is read by a small `steward-cat` of its own, which writes one event
+  per line to your channel. A manager crash or an upgrade leaves it reading,
+  so neither breaks a service's output — a program writing into a closed pipe
+  can crash — and `stewctl logs` works with no manager at all. Where the
+  machine has no channel for you, or a unit says `StandardOutput=file`,
+  output goes straight to the unit's log file through an inherited handle.
 - **One thread, one completion port.** Process exits, job notifications, and
   the SCM's or console's controls all arrive on one port, and the manager
   checks each job's process count at least once a second as well, since Windows
@@ -102,8 +107,17 @@ separators in it.
 | Path | |
 | --- | --- |
 | `%APPDATA%\steward\units\` | Your units: `*.service`, `*.target`, `*.timer`. |
-| `%LOCALAPPDATA%\steward\steward.log` | The manager's own log; set aside as `steward.log.1` past 8 MiB. |
-| `%LOCALAPPDATA%\steward\logs\<unit>.log` | Each unit's output and steward's lines about it; set aside as `<unit>.log.1` past 8 MiB, at a start or during the run. |
-| Event Log channel `Steward/<your SID>` | The same, for a unit with `StandardOutput=eventlog`: one event per line, 64 MiB for all of your units unless the install says otherwise (`services.steward.eventlog.channelSize`), oldest overwritten. Read by `stewctl logs`, Event Viewer or `Get-WinEvent`. |
+| `%LOCALAPPDATA%\steward\steward.log` | The manager's own log, always a file; set aside as `steward.log.1` past 8 MiB. |
+| Event Log channel `Steward/<your SID>` | Each unit's output and steward's lines about it, one event per line, where the install gave you a channel: 64 MiB for all of your units unless the install says otherwise (`services.steward.eventlog.channelSize`), oldest overwritten. Readable by you, administrators and SYSTEM. Read by `stewctl logs`, Event Viewer or `Get-WinEvent`. |
+| `%LOCALAPPDATA%\steward\logs\<unit>.log` | The same, for a unit that says `StandardOutput=file`, on a machine without the channels, or for a run whose `steward-cat` could not start; set aside as `<unit>.log.1` past 8 MiB, at a start or during the run. |
 | `%LOCALAPPDATA%\steward\state-<session>.json` | The session's processes, units at rest, active targets and timer schedules. Removed once a stop of everything completes. |
 | `%LOCALAPPDATA%\steward\timers\<unit>` | When a `Persistent=` timer last elapsed. Per user, so it survives sign-out. |
+
+The channels are machine state, written by the provisioning task that runs as
+SYSTEM at every sign-in, and shared by every account on the machine:
+
+| Path | |
+| --- | --- |
+| `%ProgramData%\steward\channels.man` | The manifest naming every channel the task has created, one per account that has signed in since the install. It only grows, and it is what the uninstall removes. |
+| `%ProgramData%\steward\provision-eventlog.log` | What the task's last run did, including any channel it could not enable. |
+| `%SystemRoot%\System32\winevt\Logs\Steward%4<SID>.evtx` | Each channel's records. Charged to the machine, not to your profile, and left behind when an account is deleted until the uninstall or an administrator removes it. |
