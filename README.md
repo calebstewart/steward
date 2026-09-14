@@ -252,6 +252,14 @@ change it, run the block above again with the new size in both places: the
 run resizes every channel there is, without re-creating any, and each logon
 after puts back a size someone set by hand with `wevtutil sl`.
 
+A smaller size takes nothing away from what a channel already holds.
+`wevtutil gl` reports the new size at once, but a channel whose file has
+grown past it keeps that file and every record in it, and goes on
+overwriting its oldest records at the size the file had reached. Only
+clearing it, `wevtutil cl Steward/<SID>` from an administrator prompt, gives
+the disk back, and it takes those records with it; from then on the channel
+grows no further than the new size.
+
 Use the copy you installed, as above. The manifest names that path as the
 channels' resource file, and the Event Log service reads it as itself
 (`NT SERVICE\EventLog`), so it must be somewhere that account can read.
