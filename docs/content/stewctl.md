@@ -99,10 +99,9 @@ With units, each in detail, then the last ten lines of its log:
 ```
 
 `Main PID` and `Processes` appear while it runs; a timer shows its next
-`Trigger`, what it `Triggers`, and when it `Last` elapsed. The ten lines come
-from wherever the unit's output goes — its file, or for a unit with
-`StandardOutput=eventlog` your Event Log channel, read as [`logs`](#logs)
-reads it.
+`Trigger`, what it `Triggers`, and when it `Last` elapsed. A service's
+`Output` line says where its output goes, your Event Log channel or its log
+file, and the ten lines come from there, read as [`logs`](#logs) reads them.
 
 ## start, stop, restart
 
@@ -179,14 +178,16 @@ stewctl logs -n 200 whkd    # the last 200
 stewctl logs -f whkd        # and keep printing what is appended
 ```
 
-Each unit's standard output and error go to
-`%LOCALAPPDATA%\steward\logs\<unit>.log`, and the manager writes its own lines
-about the unit into the same file — started, exited with code 3, restarting in
-5 s, failed — marked `-- <time> steward:`. `logs` reads that file itself, so it
-works with the manager down, falling back to this shell's `%LOCALAPPDATA%`. The
-path is printed first, on standard error, so the output pipes clean; piping it
-into something that stops reading early, like `Select-Object -First 3`, is
-fine.
+A unit's standard output and error go to your Event Log channel where the
+machine has one ([below](#a-unit-in-the-event-log)), and otherwise, or when
+its file says `StandardOutput=file`, to
+`%LOCALAPPDATA%\steward\logs\<unit>.log`. Either way the manager writes its
+own lines about the unit among the output — started, exited with code 3,
+restarting in 5 s, failed — marked `-- <time> steward:`. `logs` reads the
+file or the channel itself, so it works with the manager down, falling back
+to this shell's `%LOCALAPPDATA%`. The file's path or the channel's name is
+printed first, on standard error, so the output pipes clean; piping it into
+something that stops reading early, like `Select-Object -First 3`, is fine.
 
 A misspelt unit gets a suggestion:
 
@@ -195,9 +196,10 @@ A misspelt unit gets a suggestion:
 stewctl: no unit named komorebbi.service; did you mean komorebi?
 ```
 
-Service output carries no timestamps of its own, since it goes straight to the
-file rather than through the manager — which is what keeps a service's output
-working through a manager crash. A log over 8 MiB is set aside as
+In a file, service output carries no timestamps of its own, since it goes
+straight to the file rather than through the manager — which is what keeps a
+service's output working through a manager crash. In the channel each line
+is an event with its own time. A log file over 8 MiB is set aside as
 `<unit>.log.1` and begun again, at a start and every 10 s while the unit
 runs, replacing the previous `<unit>.log.1`; a line from steward near the
 top of the new log says so. While the unit runs, the log is copied aside and
@@ -208,10 +210,12 @@ same size.
 
 ### A unit in the Event Log
 
-A unit whose file says `StandardOutput=eventlog` (or `journal`, its name on
-Linux) writes to your Event Log channel instead, `Steward/<your SID>`, one
-event per line. `logs` reads that channel for it, and prints the same thing:
-the lines in order, the manager's lines among them marked `-- <time>
+On a machine with steward's elevated install, a unit writes to your Event
+Log channel, `Steward/<your SID>`, one event per line, unless its file says
+`StandardOutput=file`. Without that install there is no channel, and a unit
+that does not say writes to its file, as above. `logs` reads the channel for
+a unit whose output goes there, and prints the same thing it would from a
+file: the lines in order, the manager's lines among them marked `-- <time>
 steward:`, and the channel's name first, on standard error.
 
 ```console
@@ -233,20 +237,27 @@ written while nothing was listening to the channel, which happens on an
 account's first sign-in before the channel exists; how much was lost is in
 the line.
 
-`logs` tells the two kinds of unit apart by reading the unit file — the one
-the manager loaded, or the one in `%APPDATA%\steward\units` when no manager
-runs — so it needs no manager for either. It reads the channel with
+A `%` in a line is kept in the channel as `％`, the fullwidth percent sign,
+because the Event Log shows most lines with a `%` in them as empty. Event
+Viewer and `Get-WinEvent` show `％`; `logs` prints `%` again.
+
+`logs` asks the running manager where each unit's output goes. With no
+manager it reads the unit file in `%APPDATA%\steward\units`, and for a unit
+that does not say, it reads the channel if you have one and the file if you
+do not, so it needs no manager for either. It reads the channel with
 `EvtQuery` and `EvtRender` only. steward's provider has no message file, so
 `wevtutil gp` and `Get-WinEvent` complain about that on every call; `logs`
 never goes through the part that complains. What a channel holds is bounded
 by its size, 64 MiB unless the install chose otherwise
 (`services.steward.eventlog.channelSize`, or `--channel-size` on the task),
-which is roughly 50,000 lines for all of your units together; there is no
-`.log.1`.
+which is roughly 50,000 short lines for all of your units together, or
+about 28,000 lines of a daemon like komorebi, whose lines are longer; there
+is no `.log.1`.
 
-Until your channel exists, `logs` says so and exits 1. A task creates it at
-sign-in; on the first sign-in after an install that is a few seconds after
-the manager has started, and from then on it is there before the manager is.
+Until your channel exists, `logs` says so and exits 1. The manager asks the
+provisioning task to create it as soon as it starts a unit and finds it
+missing, which takes well under a second, and holds the units' output until
+then; from then on the channel is there before the manager is.
 
 If the manager cannot start a unit's `steward-cat` at all, that unit's output
 falls back to its log file for the run, and `stewctl status` says so. `logs`

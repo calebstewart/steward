@@ -174,13 +174,20 @@ in
 
     # The task covers every logon after this one. Whoever is signed in right
     # now would otherwise wait until their next, so the apply runs it once --
-    # and again when the size changes, which is part of the command and so
-    # of what winpkgs decides by. Nothing to prune afterwards: unlike
-    # registering the task, running it only creates channels, and those
-    # outlive any configuration.
+    # and again when the size changes, which is why the arguments are among
+    # the triggers. The apply starts the task rather than running the
+    # program itself: finding who is signed in takes SYSTEM's privilege, and
+    # an elevated administrator run passes over every session and creates
+    # nothing (seen, 2026-09-14, #28). Started, not waited for; its report
+    # is %ProgramData%\steward\provision-eventlog.log. Nothing to prune
+    # afterwards: unlike registering the task, running it only creates
+    # channels, and those outlive any configuration.
     winpkgs.activation.steward-eventlog = {
-      command = ''& "${exe}" ${provisionArgs}'';
-      triggers = [ cfg.package ];
+      command = ''& "$env:SystemRoot\System32\schtasks.exe" /run /tn steward-provision-eventlog'';
+      triggers = [
+        cfg.package
+        provisionArgs
+      ];
     };
   };
 }

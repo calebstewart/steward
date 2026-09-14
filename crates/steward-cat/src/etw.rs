@@ -2,8 +2,8 @@
 //! writing the two TraceLogging events.
 //!
 //! The shim registers one for the unit it carries; the manager registers one
-//! for itself and writes its lines about every `StandardOutput=eventlog`
-//! unit through it, as the [`Stream::Steward`] stream. Both address the same
+//! for itself and writes its lines about every unit whose output goes to
+//! the channel through it, as the [`Stream::Steward`] stream. Both address the same
 //! provider GUID, the user's, so the unit's name is a field of each event
 //! rather than a property of the registration.
 

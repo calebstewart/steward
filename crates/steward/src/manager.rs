@@ -30,9 +30,11 @@ use std::time::{Duration, Instant, SystemTime};
 use steward_cat::etw::{Channel, Level, Provider};
 use steward_cat::{utf16, Stream};
 use steward_eventlog::{
-    channel_name, provider_guid, provider_name, CHANNEL_KEYWORD, CHANNEL_VALUE,
+    channel_name, provider_guid, provider_name, CHANNEL_KEYWORD, CHANNEL_VALUE, PROVISION_TASK,
 };
-use steward_ipc::{ManagerStatus, Request, Response, TimerStatus, UnitStatus};
+use steward_ipc::{
+    ManagerStatus, Request, Response, TimerStatus, UnitStatus, OUTPUT_EVENTLOG, OUTPUT_FILE,
+};
 use steward_supervisor::plan::{DEFAULT_TARGET, GRAPHICAL_TARGET, TIMERS_TARGET, TRAY_TARGET};
 use steward_supervisor::{
     Action, Decision, Event as UnitEvent, Machine, Moments, Outcome, Plan, Process, Progress,
@@ -129,9 +131,9 @@ enum Output {
         stderr: OwnedHandle,
         shim: Tracked,
     },
-    /// A `StandardOutput=eventlog` unit whose `steward-cat` could not be
-    /// started, or exited: its output goes to its file for this run, and
-    /// this is why.
+    /// A unit whose output was to go to the channel, but whose `steward-cat`
+    /// could not be started, or exited: its output goes to its file for this
+    /// run, and this is why.
     Fallback(String),
 }
 
@@ -161,8 +163,8 @@ struct Unit {
     /// every time it is tried again.
     log_warned: bool,
     /// Where this run's output goes, once a run has begun. `None` for a
-    /// `StandardOutput=file` unit, which opens its log at each spawn, and
-    /// for an eventlog unit adopted from another manager, whose pipes and
+    /// unit whose output goes to its file, which opens it at each spawn, and
+    /// for a unit adopted from another manager, whose pipes and
     /// shim were that manager's.
     output: Option<Output>,
 }
@@ -256,12 +258,17 @@ struct Manager {
     /// When the units' logs were last measured.
     logs_checked: Instant,
     /// The manager's own registration of the user's Event Log provider,
-    /// made the first time a `StandardOutput=eventlog` unit has a line to
-    /// be written; `None` inside once registering has failed.
+    /// made the first time a unit whose output goes to the channel has a
+    /// line to be written; `None` inside once registering has failed.
     provider: OnceCell<Option<Provider>>,
     /// Nobody listens to the provider, and that has been said: once, until
     /// somebody does again.
     channel_quiet: Cell<bool>,
+    /// Whether this machine gives the user an Event Log channel: it exists,
+    /// or the provisioning task could be run to make it. Found out the first
+    /// time it matters and kept for the manager's life; see
+    /// [`Manager::channel_here`].
+    channel_here: OnceCell<bool>,
 }
 
 /// How a manager ended.
@@ -321,6 +328,7 @@ pub fn run(port: Port, controls: Sender<Control>, inbox: Receiver<Control>) -> E
         logs_checked: Instant::now(),
         provider: OnceCell::new(),
         channel_quiet: Cell::new(false),
+        channel_here: OnceCell::new(),
     };
     manager.load_units();
     manager.adopt();
@@ -743,6 +751,14 @@ impl Manager {
                 Some(Output::Fallback(why)) => Some(why.clone()),
                 _ => None,
             },
+            output: Some(
+                if self.to_channel(slot) {
+                    OUTPUT_EVENTLOG
+                } else {
+                    OUTPUT_FILE
+                }
+                .to_owned(),
+            ),
         }
     }
 
@@ -1500,9 +1516,7 @@ impl Manager {
         // adopted from another manager, at this manager's first: the pipes
         // and the shim were the other's and went with it, so what this one
         // starts for the unit gets a shim of its own.
-        if service.standard_output == steward_unit::Output::EventLog
-            && self.units[slot].output.is_none()
-        {
+        if self.units[slot].output.is_none() && self.to_channel(slot) {
             self.open_channel(slot);
         }
         let to_channel = matches!(self.units[slot].output, Some(Output::EventLog { .. }));
@@ -1576,10 +1590,15 @@ impl Manager {
         }
     }
 
-    /// A `StandardOutput=eventlog` unit's run begins: its pipes and its
+    /// A run whose output goes to the channel begins: its pipes and its
     /// `steward-cat`, or -- if the shim cannot be started -- its file, with
     /// a word about why in both logs and in `stewctl status`.
     fn open_channel(&mut self, slot: usize) {
+        // A unit that says `eventlog` goes to the channel whatever this
+        // finds, but it is still what asks the provisioning task to make the
+        // channel if it is missing, so that the shim is not left holding the
+        // unit's first lines until the next sign-in.
+        self.channel_here();
         let name = self.units[slot].name.clone();
         match self.start_shim(&name) {
             Ok(output) => {
@@ -1879,19 +1898,116 @@ impl Manager {
         }
     }
 
+    /// Whether the unit's output, and steward's lines about it, go to the
+    /// user's Event Log channel: what its file says, or where it says
+    /// nothing, whether this machine has the channel to give
+    /// ([`Manager::channel_here`]). Not for a run that has fallen back to
+    /// the file.
+    fn to_channel(&self, slot: usize) -> bool {
+        let unit = &self.units[slot];
+        if matches!(unit.output, Some(Output::Fallback(_))) {
+            return false;
+        }
+        match unit.machine.service().standard_output {
+            Some(steward_unit::Output::EventLog) => true,
+            Some(steward_unit::Output::File) => false,
+            None => self.channel_here(),
+        }
+    }
+
+    /// Whether this machine gives the user an Event Log channel, which is
+    /// where a unit's output goes when its file does not say.
+    ///
+    /// Yes if the channel is registered and its session listens. No if it is
+    /// registered and nothing listens: it is not going to start listening
+    /// by itself, and a unit that did not ask for the channel should not
+    /// have its output held for it.
+    ///
+    /// If it is not registered, the provisioning task is asked to make it
+    /// now, which any signed-in user may do, rather than left to its logon
+    /// trigger: on an account's first sign-in the manager starts units
+    /// before the task has run, and until it has, the shims hold the units'
+    /// output. Yes if the task could be started -- the channel is on its
+    /// way, and the shims write what they held once it comes. No if it could
+    /// not: nothing installed the task, as on a machine that runs steward in
+    /// a console or never took the elevated install step, and a channel is
+    /// never coming, so a unit that did not ask for the channel has its
+    /// output in a file it can be read from rather than in a shim's memory.
+    /// A unit that asked for it gets the channel regardless
+    /// ([`Manager::to_channel`]).
+    ///
+    /// Found out once and kept for the manager's life: the answer only
+    /// changes when an administrator installs or removes steward, and a unit
+    /// should not change where it writes from one run to the next because a
+    /// check was made again.
+    fn channel_here(&self) -> bool {
+        *self.channel_here.get_or_init(|| {
+            let sid = match steward_ipc::pipe::user_sid() {
+                Ok(sid) => sid,
+                Err(e) => {
+                    error!(
+                        "cannot tell the user's SID ({e}), so no Event Log channel: units that \
+                         do not say StandardOutput= write to their log files"
+                    );
+                    return false;
+                }
+            };
+            let channel = channel_name(&sid);
+            match steward_ipc::channel::registered(&sid) {
+                // Registered is not the same as working: a channel can be
+                // disabled, the Event Log service can be down, and a channel
+                // removed and imported again can come back unable to be
+                // enabled (4201, see `NOT_ENABLED` in `eventlog.rs`), all
+                // with its key in place and saying it is enabled (seen,
+                // 2026-09-14, #28). The Event Log's session for a channel
+                // that works enables the provider as soon as it registers.
+                Ok(true) if self.provider().is_some_and(Provider::listening) => {
+                    info!("{channel} exists; units that do not say StandardOutput= write to it");
+                    return true;
+                }
+                Ok(true) => {
+                    warning!(
+                        "{channel} exists, but nothing listens to it: it is disabled, the Event \
+                         Log service is not running, or it could not be enabled (the \
+                         {PROVISION_TASK} task's report names it); units that do not say \
+                         StandardOutput= write to their log files"
+                    );
+                    return false;
+                }
+                Ok(false) => {}
+                Err(e) => warning!("cannot tell whether {channel} exists ({e})"),
+            }
+            match crate::eventlog::run_task() {
+                Ok(()) => {
+                    info!(
+                        "{channel} does not exist yet: started the {PROVISION_TASK} task to create \
+                         it; units' output is held until it does"
+                    );
+                    true
+                }
+                Err(e) => {
+                    info!(
+                        "{channel} does not exist, and the {PROVISION_TASK} task could not be \
+                         started ({e}): units that do not say StandardOutput= write to their log \
+                         files"
+                    );
+                    false
+                }
+            }
+        })
+    }
+
     /// A line from steward itself in the unit's log, between its output: in
-    /// its file or, for a `StandardOutput=eventlog` unit, in the channel, as
-    /// an event of the `steward` stream from the manager's own registration
-    /// of the user's provider.
+    /// its file or, for a unit whose output goes to the channel, in the
+    /// channel, as an event of the `steward` stream from the manager's own
+    /// registration of the user's provider.
     fn mark(&self, slot: usize, message: &str) {
         self.mark_at(slot, Level::Info, message);
     }
 
     fn mark_at(&self, slot: usize, level: Level, message: &str) {
         let unit = &self.units[slot];
-        let to_channel = unit.machine.service().standard_output == steward_unit::Output::EventLog
-            && !matches!(unit.output, Some(Output::Fallback(_)));
-        if to_channel {
+        if self.to_channel(slot) {
             if !self.mark_event(&unit.name, level, message) {
                 // Nobody listens -- the channel does not exist yet, or the
                 // Event Log service is restarting -- so the line goes here,
@@ -1916,39 +2032,46 @@ impl Manager {
         }
     }
 
+    /// The manager's own registration of the user's provider, made the first
+    /// time it is wanted: for a mark, or to ask whether anyone listens.
+    fn provider(&self) -> Option<&Provider> {
+        self.provider
+            .get_or_init(|| {
+                let sid = match steward_ipc::pipe::user_sid() {
+                    Ok(sid) => sid,
+                    Err(e) => {
+                        error!("cannot tell the user's SID, so no Event Log provider: {e}");
+                        return None;
+                    }
+                };
+                let name = provider_name(&sid);
+                let channel = Channel {
+                    guid: provider_guid(&sid).to_u128(),
+                    name: &name,
+                    channel: CHANNEL_VALUE,
+                    keyword: CHANNEL_KEYWORD,
+                };
+                match Provider::register(&channel, None) {
+                    Ok(provider) => {
+                        info!("registered {name}, to write to {}", channel_name(&sid));
+                        Some(provider)
+                    }
+                    Err(e) => {
+                        error!(
+                            "cannot register the Event Log provider {name} ({e}); steward's \
+                             lines about units whose output goes to the channel go here"
+                        );
+                        None
+                    }
+                }
+            })
+            .as_ref()
+    }
+
     /// Writes a mark as an event, if a session is listening for them. Says
     /// once when none is, and once more each time that comes back.
     fn mark_event(&self, unit: &str, level: Level, message: &str) -> bool {
-        let provider = self.provider.get_or_init(|| {
-            let sid = match steward_ipc::pipe::user_sid() {
-                Ok(sid) => sid,
-                Err(e) => {
-                    error!("cannot tell the user's SID, so no Event Log provider: {e}");
-                    return None;
-                }
-            };
-            let name = provider_name(&sid);
-            let channel = Channel {
-                guid: provider_guid(&sid).to_u128(),
-                name: &name,
-                channel: CHANNEL_VALUE,
-                keyword: CHANNEL_KEYWORD,
-            };
-            match Provider::register(&channel, None) {
-                Ok(provider) => {
-                    info!("registered {name}, to write to {}", channel_name(&sid));
-                    Some(provider)
-                }
-                Err(e) => {
-                    error!(
-                        "cannot register the Event Log provider {name} ({e}); steward's lines \
-                         about eventlog units go here"
-                    );
-                    None
-                }
-            }
-        });
-        let Some(provider) = provider else {
+        let Some(provider) = self.provider() else {
             return false;
         };
         if !provider.listening() {

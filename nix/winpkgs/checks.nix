@@ -172,15 +172,16 @@ in
         test "$(task securityDescriptor)" = 'D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;0x1200a9;;;AU)'
         test "$(jq -r '.resources[] | select(.type == "winpkgs/task") | .scope' <<<"$doc")" = machine
 
-        # And a run at install, for whoever is signed in already.
+        # And a run at install, for whoever is signed in already: the task
+        # started, since only SYSTEM can find who that is (#28).
         eventlog() { jq -r --arg f "$1" '.resources[] | select(.id == "Activation steward-eventlog") | .properties[$f] | tostring' <<<"''${2:-$doc}"; }
-        test "$(eventlog command)" = '& "C:\Program Files\steward\steward.exe" provision-eventlog --channel-size 64MiB'
+        test "$(eventlog command)" = '& "$env:SystemRoot\System32\schtasks.exe" /run /tn steward-provision-eventlog'
         [[ "$(eventlog revision)" =~ ^[0-9a-f]{64}$ ]]
 
-        # Another size reaches the task and the run at install alike, and the
-        # run happens again for it: the channels are resized at the apply.
+        # Another size reaches the task, and the run happens again for it:
+        # the channels are resized at the apply.
         test "$(task arguments "$kibDoc")" = 'provision-eventlog --channel-size 1028KiB'
-        test "$(eventlog command "$kibDoc")" = '& "C:\Program Files\steward\steward.exe" provision-eventlog --channel-size 1028KiB'
+        test "$(eventlog command "$kibDoc")" = "$(eventlog command)"
         test "$(eventlog revision "$kibDoc")" != "$(eventlog revision)"
         test "$(task arguments "$bytesDoc")" = 'provision-eventlog --channel-size 100000000'
         # And a size Windows would raise is refused at evaluation, not left

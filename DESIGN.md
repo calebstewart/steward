@@ -226,9 +226,10 @@ template, but both had the default).
   including `KillMode=process` children that share their parent's console; a
   program started with `start /b` ignores it and is terminated at the timeout.
 - **Processes are created in their job** (`PROC_THREAD_ATTRIBUTE_JOB_LIST`), so
-  nothing escapes in the instant before assignment, and inherit exactly two
-  handles (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`): NUL for stdin and the unit's
-  log for stdout and stderr. Jobs have `DIE_ON_UNHANDLED_EXCEPTION`, so a
+  nothing escapes in the instant before assignment, and inherit only the
+  handles they need (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`): NUL for stdin, and
+  for stdout and stderr the write ends of the pipes to the unit's shim or the
+  unit's log file (see "Logs"). Jobs have `DIE_ON_UNHANDLED_EXCEPTION`, so a
   crash ends the process at once instead of waiting on an error-reporting
   dialog.
 - **No console windows.** Console programs are started with `CREATE_NO_WINDOW`
@@ -245,35 +246,19 @@ template, but both had the default).
 
 ## Logs
 
-Each unit's stdout and stderr go straight to
-`%LOCALAPPDATA%\steward\logs\<unit>.log` through a handle the service's
-processes inherit, not through a pipe to the manager: a manager crash cannot
-break a service's output (a Rust program that `println!`s into a closed pipe
-panics). The manager writes its own lines for the unit -- started, exited
-with code N, restarting in 5 s, failed -- into the same file, marked
-`-- <time> steward:`.
+A unit's output can go to one of two places: the user's Event Log channel,
+or a file of its own. The channel is the default wherever the machine gives
+the user one, which is wherever steward's elevated install ran; the file is
+where a unit's output goes when it says `StandardOutput=file`, and on a
+machine without the channels, such as one where steward only ever runs in a
+console. Either way the manager's own lines about the unit -- started, exited
+with code N, restarting in 5 s, failed -- go among the output, and
+`stewctl logs` reads both kinds without a manager. The manager's own log,
+`steward.log`, is always a file: the log that would explain the channel must
+not depend on it.
 
-A log over 8 MiB is set aside as `<unit>.log.1` and begun again: at a start,
-and every 10 s during the run, since a daemon that logs steadily may never
-start again. It is set aside in place -- copied, then cut to nothing -- not
-renamed: the unit's processes hold the inherited handle and would go on
-writing to a renamed file. The handle is append-only, and an append-only
-write lands at the file's current end whatever the handle's position, so
-what they write next begins the emptied file. A line written during the
-copy is lost; the line steward writes near the top of the new log (the
-processes may get a line in first) says so. So a unit has at most two logs'
-worth on disk, the previous `.log.1` being replaced each time. The manager's own log,
-`%LOCALAPPDATA%\steward\steward.log`, is renamed to `steward.log.1` past the
-same size; the manager is its only writer, so a rename loses nothing.
+### The Event Log
 
-`stewctl logs [-f] <unit>` reads the files directly, so it works with the
-manager down; a tail is read from the file's end in chunks, not whole, so a
-large log costs no more than a small one. The price of files over a pipe is
-that service output carries
-no timestamps of its own.
-
-The Windows Event Log is the other place a unit's output can go, and a unit
-asks for it with `StandardOutput=eventlog`; the file stays the default.
 There is one channel per user (`Steward/<their SID>`, granted to that user,
 administrators and SYSTEM). Creating a channel needs an administrator, and
 the accounts that will sign in to a machine are not known to the one elevated
@@ -288,22 +273,20 @@ change. Declared by whatever installs steward -- `windows.scheduledTasks`, or
 the README's by-hand steps -- and not registered by steward itself, for the
 same reason the service is: a task winpkgs owns is deleted again when steward
 leaves a configuration, where a program that registered its own would leave
-one running as SYSTEM behind. `steward-eventlog` holds the names, the provider
-GUIDs and the manifest, because the task and the per-unit shim that writes the
-events have to agree on all three without talking to each other -- and the
-events' own names and fields, because `stewctl logs` reads them back. `stewctl
-logs` and `status` read a unit's events with an XPath on the `unit` field,
-newest first for a tail and by subscription for `-f`, and never through the
-publisher's metadata, which the provider has none of; which of the two places
-a unit writes to is read off its unit file, `StandardOutput=`, so no manager
-is needed.
+one running as SYSTEM behind. The install starts the task once rather than
+running the program: finding who is signed in takes SYSTEM's privilege, and
+the program run by an elevated administrator passes over every session and
+creates nothing. `steward-eventlog` holds the names, the provider GUIDs and
+the manifest, because the task and the per-unit shim that writes the events
+have to agree on all three without talking to each other -- and the events'
+own names and fields, because `stewctl logs` reads them back.
 
 A unit's output cannot go straight from its handle to a channel the way it
 goes to a file: something has to read the pipe and call `EventWrite`. That
 something must not be the manager -- a manager crash would then break every
-unit's output, the one thing the file model got right. So for each
-`StandardOutput=eventlog` unit the manager starts a `steward-cat` (in the
-spirit of `systemd-cat`): it hands the unit's processes the write ends of two
+unit's output, the one thing the file model got right. So for each unit whose
+output goes to the channel the manager starts a `steward-cat` (in the spirit
+of `systemd-cat`): it hands the unit's processes the write ends of two
 pipes, stdout and stderr, and the shim the read ends, and the shim writes
 each line to the channel as one TraceLogging event with the fields `unit`,
 `stream` and `bytes`. The shim is **not** in the unit's job and **not** a
@@ -320,24 +303,146 @@ channel too, as events of a `steward` stream from the manager's own
 registration of the provider, so a reader sees them between the output as
 they see the `-- steward:` marks in a file.
 
+Which place a unit's output goes is decided when the manager starts it. A
+unit that says gets what it says. For one that does not, the manager looks
+once, the first time it matters, and keeps the answer for its life: the
+channel if it is registered and its session listens to the provider; the
+file if it is registered and nothing listens, since a channel that is
+disabled, or that the Event Log could not enable, is not going to start
+listening by itself; and if it is not registered, the channel if the
+provisioning task could be started to make it -- which any signed-in user
+may do, and which the manager does then and there rather than wait for the
+logon trigger -- and the file if it could not, because nothing installed
+it. `stewctl` asks the running manager where each unit's output went, and
+with no manager reads the unit file and, for a unit that does not say,
+whether the user's channel is registered (its key under `WINEVT\Channels`,
+which any user may read).
+
 The shim holds output in a bounded buffer until a session enables the
 provider -- an `EventWrite` to a channel nobody listens to is discarded and
 still returns success -- which is what covers an account's first sign-in,
-before the provisioning task has created the channel. The manager's own
-marks are held differently: it has no buffer, so a mark written while nobody
-listens goes to `steward.log` instead, beside the line saying nobody does,
-which is exactly what a reader diagnosing the race wants to find.
+before the task has created the channel. The manager's own marks are held
+differently: it has no buffer, so a mark written while nobody listens goes
+to `steward.log` instead, beside the line saying nobody does, which is
+exactly what a reader diagnosing the race wants to find.
+
+A `%` in a line goes into the channel as `％`, U+FF05 FULLWIDTH PERCENT SIGN,
+and `stewctl logs` turns it back. The Event Log reads a `%` in a TraceLogging
+string as the start of an insertion when it renders the event: `%%`, `%1` to
+`%99` and a `%` at the very end pass, and anything else -- `100% done`, the
+`%20` of a URL, `%s`, `%n` -- renders the whole event with every field empty,
+in `EvtRender`, `Get-WinEvent` and Event Viewer alike, though the `.evtx`
+holds the text intact. Doubling it, the escape the Event Log documents for
+message text, is none here: `%%` comes back as `%%` in the event's values
+and XML, and Event Viewer's General tab shows "The operation completed
+successfully." in place of the message for any line with a `%`, doubled or
+not. The fullwidth sign renders on every path and is one UTF-16 unit, so a
+line's length is unchanged; a fullwidth sign a program wrote itself comes
+back from `stewctl` as `%`.
 
 If the shim cannot be started at all, the unit's output falls back to its
 file for that run, and both `steward.log` and `stewctl status` say so. If a
 running shim exits with the unit still going -- it crashed, or something
 ended it -- the running processes' output is lost from that moment (there is
-nothing left reading their pipe), and what the manager starts for the unit
-next writes to the file; that too is said in both places. `rotate_log` and
-the periodic size check skip a unit whose output is in the channel, since it
-has no file growing; a unit that has fallen back to its file is measured
-like any other. `steward.log` stays a file, always: the log that would
-explain the channel must not depend on it.
+nothing left reading their pipe), and the next thing written to the pipe
+fails; that too is said in both places. `rotate_log` and the periodic size
+check skip a unit whose output is in the channel, since it has no file
+growing; a unit that has fallen back to its file is measured like any other.
+
+### The file
+
+A unit's output goes straight to `%LOCALAPPDATA%\steward\logs\<unit>.log`
+through a handle the service's processes inherit, not through a pipe to the
+manager: a manager crash cannot break a service's output (a Rust program
+that `println!`s into a closed pipe panics). The manager's marks go into the
+same file, marked `-- <time> steward:`.
+
+A log over 8 MiB is set aside as `<unit>.log.1` and begun again: at a start,
+and every 10 s during the run, since a daemon that logs steadily may never
+start again. It is set aside in place -- copied, then cut to nothing -- not
+renamed: the unit's processes hold the inherited handle and would go on
+writing to a renamed file. The handle is append-only, and an append-only
+write lands at the file's current end whatever the handle's position, so
+what they write next begins the emptied file. A line written during the
+copy is lost; the line steward writes near the top of the new log (the
+processes may get a line in first) says so. So a unit has at most two logs'
+worth on disk, the previous `.log.1` being replaced each time. The manager's
+own log, `%LOCALAPPDATA%\steward\steward.log`, is renamed to `steward.log.1`
+past the same size; the manager is its only writer, so a rename loses
+nothing.
+
+`stewctl logs [-f] <unit>` reads the files directly, so it works with the
+manager down; a tail is read from the file's end in chunks, not whole, so a
+large log costs no more than a small one. The price of files over a pipe is
+that service output carries no timestamps of its own.
+
+### Why the channel is the default
+
+The Event Log was opt-in when it landed (#23 to #27), with the file kept as
+the always-safe default until a verification on a real machine (#28) could
+say whether it held up. It did, and on 2026-09-14 the default was changed
+to the channel. What it gives over the file: every line timestamped;
+retention by size across all of a user's units instead of one fixed
+generation per unit; no line lost while a log is set aside; old output of a
+removed unit that ages out by itself; access control, Event Viewer, XPath
+queries and live subscription, all from Windows; and a collector, the Event
+Log service, that is always alive and never makes a writer wait.
+
+What was measured, on Windows 11 26200 with one real account, the channel
+created by the task and written through the manager and the real shim:
+
+| What | Result |
+| --- | --- |
+| First sign-in: units start before the channel exists | The manager found the channel missing and started the task 60 ms after starting; the task ran as SYSTEM 10 ms later, imported in 0.2 s, and both units' 20 startup lines arrived in order, 0.2 s after they were written. At-logon tasks on the same machine start within the second of sign-in. |
+| Manifest re-imported twice, adding two accounts, while a unit wrote 500 lines/s | 30,000 of 30,000 lines, in order; the channel's session kept its thread and lost nothing, and its `.evtx` kept its creation time |
+| 30,000-line bursts at 1,000 to 200,000 lines/s, and flat out | All arrived; ETW lost nothing |
+| 100,000 lines/s for 5 s | Nothing lost |
+| Flat out, about 1.1 million lines/s, for 500,000 lines | 442,758 lost, silently, as #25 found |
+| Manager killed, a new one adopting, a hand-over, and a third adopting, while a unit wrote 100 lines/s | The same shim throughout; 2,922 of 2,922 lines, in order |
+| Node, Windows PowerShell 5.1, curl's progress meter, `cmd`, a Rust program, each to a file and to the channel | The same text; a line written without a newline appears in the channel when its newline does, as under journald |
+| Storage | 1,330 bytes of `.evtx` a record for an 80-byte line; 2,374 for this machine's komorebi lines (7.2 times the text), so 64 MiB holds about 28,000 of them |
+| Event Viewer | The General tab shows a message built from the fields -- `Output`, then `unit`, `stream` and `bytes` -- and the Details tab the fields themselves |
+
+What it costs, and what to keep an eye on:
+
+- **Retention is in lines, not megabytes.** This machine's units wrote about
+  17,000 lines in two days, most of them komorebi's, so a 64 MiB channel
+  holds three to four days of them, where komorebi's 8 MiB file and its
+  `.log.1` held about a week. A chatty unit also ages out a quiet one's
+  history, since they share the channel. `channelSize` is the answer where it
+  matters; whether its default should grow is open.
+- **A dead shim can take its unit with it.** A file never breaks; a pipe
+  whose reader has gone does. With the shim killed, Node exited, the Rust
+  program's writes failed (one that `println!`s would panic) and Windows
+  PowerShell carried on with its output lost. The shim is small and has not
+  been seen to crash on its own, but a manager that kept a copy of the read
+  end could start a replacement on the same pipe.
+- **Loss past about 100,000 lines a second is silent**, as #25 found: ETW
+  drops, `EventWrite` still succeeds, and no line can mark the gap the way
+  the file's set-aside line does.
+- **A channel can be registered and dead.** Removing a channel and importing
+  it again under the same name while the Event Log service runs, or flooding
+  one for long enough, has left it unable to be enabled (4201, see
+  `NOT_ENABLED`), its registry key still saying it is enabled. The manager's
+  check for a listening session catches it and sends such units to their
+  files; restarting the Event Log service, and once also importing the
+  channel again, cleared it.
+- **The channels are machine state**: administrators can read every user's
+  logs, deleted accounts leave a channel and its `.evtx` behind until the
+  uninstall, and imaging and policy tools see them.
+
+Not verified: a second real account's first sign-in, and a sign-out during
+the task, because the test machine had one account and creating another was
+not an option. Stand-in accounts, channels for made-up SIDs, covered the
+re-import; they could not be written to, since a process of one account is
+not enabled into another account's channel -- which is the isolation #23
+asked for. A sign-out mid-run is passed over by the task by design: a session
+it cannot resolve is named in its report, and a task running as SYSTEM is
+not tied to the session whose logon triggered it.
+
+The install can also create channels ahead of time, for the accounts a home
+configuration names, so that only accounts nobody foresaw take the first
+sign-in path; that is winpkgs work.
 
 ## Control plane
 
@@ -373,7 +478,7 @@ record.
 The verbs follow `systemctl`: `list-units` (the default), `list-timers`,
 `status [unit...]`, `start`, `stop`, `restart` (waiting for the units to
 settle unless `--no-block`), `is-active`, `daemon-reload`, and
-`logs [-f] [-n N]`, which reads the log file itself. `whkd` means `whkd.service`. Two differ:
+`logs [-f] [-n N]`, which reads the channel or the log file itself. `whkd` means `whkd.service`. Two differ:
 
 - **`switch`** reads the unit files and makes what runs match them, as
   home-manager's `sd-switch` does: removed units stop, changed running units
@@ -688,6 +793,12 @@ build remaps them.
   night it missed, a sign-in timer due at once, a timer that stops once
   spent, a manager killed and replaced (every schedule kept, a missed elapse
   made up once), and timers edited and switched without a restart.
+- **M6** (done) -- output to the Event Log: a channel per user created by a
+  task at logon (#24), the `steward-cat` shim (#25), the manager's wiring
+  (#26), `stewctl logs` on the channel (#27), and the verification that made
+  the channel the default (#28). Exercised on the machine: the first
+  sign-in path, re-imports while a unit wrote, throughput, a manager killed
+  and handed over mid-write, and programs on a pipe against a file.
 - **Later** -- event triggers.
 
 ## Open questions

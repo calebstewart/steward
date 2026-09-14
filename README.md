@@ -93,10 +93,11 @@ stewctl logs -f whkd       # its output, and steward's lines about it
 stewctl switch             # re-read the units; restart the changed, start the new
 ```
 
-Each unit's output goes to `%LOCALAPPDATA%\steward\logs\<unit>.log`; the
-manager's own log is `%LOCALAPPDATA%\steward\steward.log`. A unit with
-`StandardOutput=eventlog` writes to your Event Log channel instead, one per
-user; read it with Event Viewer or `Get-WinEvent`.
+Each unit's output goes to your Event Log channel, one per user, where the
+install below has set the channels up; read it with `stewctl logs`, Event
+Viewer or `Get-WinEvent`. Without that install, and for a unit that says
+`StandardOutput=file`, it goes to `%LOCALAPPDATA%\steward\logs\<unit>.log`.
+The manager's own log is always `%LOCALAPPDATA%\steward\steward.log`.
 
 ## Building
 
@@ -190,17 +191,18 @@ control below and leave your session without one until your next sign-in.
 
 ### The Event Log channels
 
-A unit whose file says `StandardOutput=eventlog` writes its output to an Event
-Log channel of that user's own, `Steward/<their SID>`, readable and writable
-by them, by administrators and by SYSTEM, and by nobody else, so one account
-on the machine cannot read another's. The file stays the default; this is
-opt-in per unit. The manager starts a small `steward-cat` for each such unit
-that reads its output and writes it to the channel, so a manager crash or an
-upgrade hand-over does not break the output. Creating a channel is
-administrative and the manager is not, and
-this install cannot know which accounts will ever sign in, so a Scheduled
-Task makes them as SYSTEM at the logon of any user. Still from the
-administrator prompt:
+Units write their output to an Event Log channel of their user's own,
+`Steward/<their SID>`, readable and writable by them, by administrators and by
+SYSTEM, and by nobody else, so one account on the machine cannot read
+another's. This is the default once the channels exist; a unit that says
+`StandardOutput=file` keeps its log file, and without this step every unit
+does. The manager starts a small `steward-cat` for each unit that reads its
+output and writes it to the channel, so a manager crash or an upgrade
+hand-over does not break the output. Creating a channel is administrative and
+the manager is not, and this install cannot know which accounts will ever
+sign in, so a Scheduled Task makes them as SYSTEM at the logon of any user,
+and the manager runs the same task when it starts a unit and finds its
+user's channel missing. Still from the administrator prompt:
 
 ```powershell
 $xml = @"
@@ -228,7 +230,7 @@ $xml = @"
 $s = New-Object -ComObject Schedule.Service; $s.Connect()
 $s.GetFolder('\').RegisterTask('steward-provision-eventlog', $xml, 6, 'S-1-5-18', $null, 5,
   'D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;0x1200a9;;;AU)')
-& "C:\Program Files\steward\steward.exe" provision-eventlog --channel-size 64MiB
+schtasks /run /tn steward-provision-eventlog
 ```
 
 PowerShell rather than `schtasks`, which cannot set a task's security
@@ -243,15 +245,30 @@ the two battery settings so that a laptop away from its charger still gets
 one.
 
 The last line runs it once for whoever is signed in already; everyone else
-gets a channel at their next sign-in. Running it again changes nothing unless
-somebody has signed in who had not before. Each run leaves an account of
-itself in `%ProgramData%\steward\provision-eventlog.log`. A channel the Event
-Log cannot enable -- seen once, for a channel whose session had been flooded
-for an hour, and importing it again did not help -- is named there and
-passed over, the others are provisioned regardless, and the run exits 1, so
-the task's last result shows it. Restarting the Event Log service
-(`Restart-Service EventLog -Force`, which restarts the services that depend
-on it too) or the machine clears it, and the next run provisions the channel.
+gets a channel at their next sign-in. It starts the task rather than running
+`steward.exe provision-eventlog` from this prompt, because finding who is
+signed in takes SYSTEM's privilege: run by an administrator, the program
+passes over every session and creates nothing. Running it again changes
+nothing unless somebody has signed in who had not before. Each run leaves an
+account of itself in `%ProgramData%\steward\provision-eventlog.log`.
+
+A channel the Event Log cannot enable is named there and passed over, the
+others are provisioned regardless, and the run exits 1, so the task's last
+result shows it. It has been seen for a channel whose session had been
+flooded for an hour, and for a channel removed and imported again under the
+same name while the Event Log service kept running. The manager notices,
+since nothing listens to such a channel, and sends to their log files the
+output of units that do not say `StandardOutput=`. Restarting the Event Log
+service (`Restart-Service EventLog -Force`, which restarts the services that
+depend on it too) or the machine has cleared it; once, a restart alone was not
+enough, and the channel came back only when it was removed and imported
+again after the restart.
+
+A `%` in a line is kept in the channel as `％`, the fullwidth percent sign.
+The Event Log renders most events with a `%` in them as empty, in Event
+Viewer and `Get-WinEvent` alike, and doubling it is no escape there, so
+Event Viewer shows `％` where the program wrote `%`; `stewctl logs` prints
+`%` again.
 
 `--channel-size` is the most each user's channel may hold before its oldest
 records are overwritten: bytes, or a whole number of `KiB`, `MiB` or `GiB`,

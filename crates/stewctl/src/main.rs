@@ -2,8 +2,8 @@
 //!
 //! Everything but `verify` and `logs` asks the running manager, over its
 //! pipe. `logs` asks it where the logs are and which units exist, then reads
-//! the log itself -- the unit's file, or for a unit whose
-//! `StandardOutput=eventlog` the caller's Event Log channel ([`eventlog`]) --
+//! the log itself -- the caller's Event Log channel ([`eventlog`]), or the
+//! unit's file where the manager says its output goes there --
 //! falling back to this shell's LOCALAPPDATA and APPDATA when no manager
 //! runs; `verify` needs no manager at all.
 
@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use steward_ipc::{Request, Response, TimerStatus, UnitStatus};
+use steward_ipc::{Request, Response, TimerStatus, UnitStatus, OUTPUT_EVENTLOG};
 use steward_unit::{LoadedUnit, Output, Severity};
 
 /// Everything stewctl prints goes through this rather than std's `println!`,
@@ -343,12 +343,7 @@ fn status(units: Vec<String>) -> Outcome {
         }
         print_unit(unit);
         println!();
-        // Where its output goes is in its unit file, at the path the manager
-        // loaded it from -- unless the manager says it fell back to the file
-        // for this run (its steward-cat could not start), in which case the
-        // file is where the output is.
-        let to_channel =
-            output_of(Path::new(&unit.path)) == Output::EventLog && unit.output_fallback.is_none();
+        let to_channel = reported_output(unit) == Output::EventLog;
         let lines = if to_channel {
             channel_tail(&unit.name, 10)
         } else {
@@ -364,14 +359,51 @@ fn status(units: Vec<String>) -> Outcome {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Where a unit's output goes, read off its unit file: the file, if there
-/// is no unit file or it does not say.
-fn output_of(unit_file: &Path) -> Output {
+/// Where a running manager says a unit's output goes. It says so outright,
+/// having decided when it started the unit, and has fallen back to the file
+/// for a run whose `steward-cat` could not start; a manager from before the
+/// Event Log was the default does not say, and went by the unit file alone.
+fn reported_output(unit: &UnitStatus) -> Output {
+    match (&unit.output_fallback, unit.output.as_deref()) {
+        (Some(_), _) => Output::File,
+        (None, Some(OUTPUT_EVENTLOG)) => Output::EventLog,
+        (None, Some(_)) => Output::File,
+        (None, None) => output_of(Path::new(&unit.path)).unwrap_or(Output::File),
+    }
+}
+
+/// Where a unit's output goes by its unit file, if it says; `None` if it
+/// does not, or there is no unit file.
+fn output_of(unit_file: &Path) -> Option<Output> {
     steward_unit::load_file(unit_file.to_path_buf())
         .parsed
         .service
-        .map(|s| s.standard_output)
-        .unwrap_or_default()
+        .and_then(|s| s.standard_output)
+}
+
+/// Where the output of a unit that does not say goes, with no manager to
+/// ask: the channel if this user has one, the file if not. The manager
+/// decides the same way, save that it also counts a channel it has just
+/// asked the provisioning task to make -- which, until the task has made
+/// it, has nothing in it to read.
+fn default_output() -> Output {
+    if channel_registered() {
+        Output::EventLog
+    } else {
+        Output::File
+    }
+}
+
+#[cfg(windows)]
+fn channel_registered() -> bool {
+    steward_ipc::pipe::user_sid()
+        .and_then(|sid| steward_ipc::channel::registered(&sid))
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn channel_registered() -> bool {
+    false
 }
 
 /// The last `n` lines of an eventlog unit's log, for `status`: what can
@@ -455,8 +487,15 @@ fn print_unit(unit: &UnitStatus) {
     if !unit.wanted_by.is_empty() {
         println!("  Wanted by: {}", unit.wanted_by.join(" "));
     }
-    if let Some(why) = &unit.output_fallback {
-        println!("     Output: its log file this run, not the Event Log: {why}");
+    // Where its output goes, now that a unit that does not say goes where
+    // the machine lets it. Only for a service: a target or a timer has no
+    // output, only steward's lines about it.
+    match (&unit.output_fallback, unit.output.as_deref()) {
+        (Some(why), _) => println!("     Output: its log file this run, not the Event Log: {why}"),
+        _ if !unit.name.ends_with(".service") => {}
+        (None, Some(OUTPUT_EVENTLOG)) => println!("     Output: the Event Log"),
+        (None, Some(_)) => println!("     Output: its log file"),
+        (None, None) => {}
     }
 }
 
@@ -550,24 +589,24 @@ struct LogView {
     /// Each unit's file, for those that have one: a log can outlive its
     /// unit.
     files: BTreeMap<String, PathBuf>,
-    /// Units whose file says `eventlog` but whose output the manager put in
-    /// their log file for this run (their `steward-cat` could not start), so
-    /// the file, not the channel, is what to read.
-    fell_back: BTreeSet<String>,
+    /// Where the running manager says each unit's output goes
+    /// ([`reported_output`]); empty when no manager runs.
+    reported: BTreeMap<String, Output>,
     from_manager: bool,
 }
 
 impl LogView {
-    /// Where `unit`'s output goes: its unit file, unless the manager reports
-    /// it fell back to the file this run.
+    /// Where `unit`'s output goes: where the manager says, or with no
+    /// manager, where its unit file says, and where that says nothing,
+    /// wherever this machine sends such output ([`default_output`]).
     fn output(&self, unit: &str) -> Output {
-        if self.fell_back.contains(unit) {
-            return Output::File;
+        if let Some(&output) = self.reported.get(unit) {
+            return output;
         }
         self.files
             .get(unit)
-            .map(|file| output_of(file))
-            .unwrap_or_default()
+            .and_then(|file| output_of(file))
+            .unwrap_or_else(default_output)
     }
 }
 
@@ -580,11 +619,10 @@ fn log_view() -> Result<LogView, String> {
         return Ok(LogView {
             dir: PathBuf::from(manager.log_dir),
             units: response.units.iter().map(|u| u.name.clone()).collect(),
-            fell_back: response
+            reported: response
                 .units
                 .iter()
-                .filter(|u| u.output_fallback.is_some())
-                .map(|u| u.name.clone())
+                .map(|u| (u.name.clone(), reported_output(u)))
                 .collect(),
             files: response
                 .units
@@ -619,8 +657,8 @@ fn log_view() -> Result<LogView, String> {
         dir,
         units,
         files,
-        // No manager: nothing has run, so nothing has fallen back.
-        fell_back: BTreeSet::new(),
+        // No manager: nothing has run, so nothing has been decided.
+        reported: BTreeMap::new(),
         from_manager: false,
     })
 }
