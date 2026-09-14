@@ -1,0 +1,24 @@
+[package]
+name = "steward-cat"
+description = "Reads a unit's stdout and stderr and writes them to the user's Event Log channel, in the spirit of systemd-cat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+steward-eventlog.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+steward-ipc.workspace = true
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+]

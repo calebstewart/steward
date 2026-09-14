@@ -1,6 +1,7 @@
 # The tests of the crates with no Windows in them -- the unit parser, the
-# supervisor's state machine, the control protocol, and the Event Log names
-# and GUIDs the provisioning and the shim have to agree on -- run natively.
+# supervisor's state machine, the control protocol, the Event Log names
+# and GUIDs the provisioning and the shim have to agree on, and what the
+# shim holds and writes -- run natively.
 { lib, rustPlatform }:
 rustPlatform.buildRustPackage {
   pname = "steward-native-tests";
@@ -27,6 +28,8 @@ rustPlatform.buildRustPackage {
     "steward-supervisor"
     "-p"
     "steward-ipc"
+    "-p"
+    "steward-cat"
   ];
   cargoTestFlags = [
     "-p"
@@ -37,6 +40,8 @@ rustPlatform.buildRustPackage {
     "steward-supervisor"
     "-p"
     "steward-ipc"
+    "-p"
+    "steward-cat"
   ];
 
   # A library has nothing to install; the check passing is the product.
