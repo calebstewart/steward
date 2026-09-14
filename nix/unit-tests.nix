@@ -1,5 +1,6 @@
 # The tests of the crates with no Windows in them -- the unit parser, the
-# supervisor's state machine, the control protocol -- run natively.
+# supervisor's state machine, the control protocol, and the Event Log names
+# and GUIDs the provisioning and the shim have to agree on -- run natively.
 { lib, rustPlatform }:
 rustPlatform.buildRustPackage {
   pname = "steward-native-tests";
@@ -21,6 +22,8 @@ rustPlatform.buildRustPackage {
     "-p"
     "steward-unit"
     "-p"
+    "steward-eventlog"
+    "-p"
     "steward-supervisor"
     "-p"
     "steward-ipc"
@@ -28,6 +31,8 @@ rustPlatform.buildRustPackage {
   cargoTestFlags = [
     "-p"
     "steward-unit"
+    "-p"
+    "steward-eventlog"
     "-p"
     "steward-supervisor"
     "-p"

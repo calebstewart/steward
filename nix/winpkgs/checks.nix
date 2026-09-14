@@ -140,6 +140,29 @@ in
 
         # stewctl is on the machine PATH.
         test "$(jq -r '.resources[] | select(.type == "winpkgs/path") | .properties.dir' <<<"$doc")" = 'C:\Program Files\steward'
+
+        # The elevated install also declares the Event Log provisioning task
+        # (#24). Declared, not registered by steward itself, so that it is
+        # deleted again when steward leaves a configuration.
+        task() { jq -r --arg f "$1" '.resources[] | select(.type == "winpkgs/task") | .properties[$f] | tostring' <<<"$doc"; }
+        test "$(task command)" = 'C:\Program Files\steward\steward.exe'
+        test "$(task arguments)" = 'provision-eventlog'
+        # As SYSTEM, at the logon of any user: no `user` on the trigger.
+        test "$(task runAs)" = 'S-1-5-18'
+        test "$(jq -r '.resources[] | select(.type == "winpkgs/task") | .properties.triggers[0].type' <<<"$doc")" = logon
+        test "$(jq -r '.resources[] | select(.type == "winpkgs/task") | .properties.triggers[0].user' <<<"$doc")" = null
+        # The settings whose defaults would be wrong here: a second logon must
+        # not lose its run, and a laptop on battery must still get one.
+        test "$(task multipleInstances)" = queue
+        test "$(task disallowStartIfOnBatteries)" = false
+        # Users may run it and may not rewrite it; it runs as SYSTEM.
+        test "$(task securityDescriptor)" = 'D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;0x1200a9;;;AU)'
+        test "$(jq -r '.resources[] | select(.type == "winpkgs/task") | .scope' <<<"$doc")" = machine
+
+        # And a run at install, for whoever is signed in already.
+        eventlog() { jq -r --arg f "$1" '.resources[] | select(.id == "Activation steward-eventlog") | .properties[$f] | tostring' <<<"$doc"; }
+        test "$(eventlog command)" = '& "C:\Program Files\steward\steward.exe" provision-eventlog'
+        [[ "$(eventlog revision)" =~ ^[0-9a-f]{64}$ ]]
         touch $out
       '';
 

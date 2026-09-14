@@ -201,12 +201,17 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "steward-eventlog",
  "steward-ipc",
  "steward-supervisor",
  "steward-unit",
  "windows-service",
  "windows-sys",
 ]
+
+[[package]]
+name = "steward-eventlog"
+version = "0.1.0"
 
 [[package]]
 name = "steward-ipc"

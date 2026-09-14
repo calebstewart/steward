@@ -1,0 +1,328 @@
+//! The instrumentation manifest `wevtutil im` reads, and the access
+//! descriptor each channel it creates is given.
+//!
+//! Channels and providers only: no event templates, no strings, and so no
+//! message resource to compile and no DLL to regenerate whenever a user is
+//! added. Events are TraceLogging, which carries its own field names and
+//! types in every record and which Event Viewer renders without a manifest
+//! having described them. What the manifest is still needed for is the part
+//! TraceLogging has no say in: a channel exists only because an
+//! administrator declared it, and this is the declaration.
+//!
+//! The manifest is also the record of what has been created. It accumulates:
+//! a user who signs out keeps their channel, its `.evtx` and so their
+//! history, and [`sids_in`] reads the previous manifest back so that the next
+//! one is a superset. That is what makes each import additive, and what
+//! leaves the uninstall a single file naming everything to remove.
+
+use crate::{channel_name, is_sid, provider_guid, provider_name, CHANNEL_MAX_SIZE, CHANNEL_VALUE};
+
+const HEADER: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!-- Written by `steward provision-eventlog`; edits are lost at the next logon.
+     The channels are the sessions signed in then, plus every channel already
+     declared here, so a user who signs out keeps theirs. -->
+<instrumentationManifest
+    xmlns="http://schemas.microsoft.com/win/2004/08/events"
+    xmlns:win="http://manifests.microsoft.com/win/2004/08/windows/events"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <instrumentation>
+    <events>
+"#;
+
+const FOOTER: &str = r#"    </events>
+  </instrumentation>
+</instrumentationManifest>
+"#;
+
+/// The access descriptor for `sid`'s channel: that user, Administrators and
+/// SYSTEM, and nobody else.
+///
+/// Read (0x1) and write (0x2) for the user -- write, because writing an
+/// event to a channel is a right the channel grants and the shim runs as
+/// them; read, because `stewctl logs` does. Not clear (0x4): nothing in
+/// steward clears a channel, and leaving it out keeps a user's own history
+/// from being emptied by anything they run by accident. Administrators get
+/// read, write and clear as they do on every built-in channel, and SYSTEM
+/// those plus the standard rights, which is what the Application channel
+/// grants it.
+///
+/// Anyone not named is denied by omission, which is the point: another
+/// account signed in to the same machine cannot read this one's output. The
+/// SID is interpolated unescaped, so it must be [`is_sid`]; a caller building
+/// this from anything but `ConvertSidToStringSid` is on its own.
+pub fn channel_access(sid: &str) -> String {
+    debug_assert!(is_sid(sid), "{sid} is not a SID");
+    format!("O:BAG:SYD:(A;;0xf0007;;;SY)(A;;0x7;;;BA)(A;;0x3;;;{sid})")
+}
+
+/// The manifest declaring a provider and a channel for each of `sids`.
+///
+/// `resource_file` is the path the manifest names as each provider's
+/// resource and message file. The schema requires both, and no provider or
+/// channel here carries a `message` attribute for Windows to resolve, so it
+/// names the binary that did the registering rather than a resource DLL that
+/// would have to be built and shipped for the sake of a required attribute.
+///
+/// What that costs is known from importing one of these for real
+/// (2026-09-14), and it is worth stating plainly because it is visible to
+/// anyone who goes looking at the channel.
+///
+/// `wevtutil im` prints "Failed to load resource" for a binary with no
+/// resource section, and imports it anyway: the channel is created, the
+/// provider is registered, events reach it and come back out with their
+/// fields intact. But `wevtutil gp` on the provider then fails with "The
+/// specified image file did not contain a resource section", and
+/// `Get-WinEvent` writes that as a non-terminating error on every call even
+/// as it returns the events and their XML. A Rust binary carries no resource
+/// section, and only one built with a `WEVT_TEMPLATE` or a message resource
+/// would quiet it; `mc.exe` is a Windows SDK tool, and steward cross-builds
+/// on Linux.
+///
+/// Two separate things, often confused. The path must also be readable by
+/// the Event Log service itself, which runs as `NT SERVICE\EventLog`: a path
+/// under a user's profile gives "Access is denied" instead, which is a
+/// different fault with the same symptom. `C:\Program Files\steward`, where
+/// steward installs, settles that one and not the other.
+///
+/// A reader can sidestep the noise entirely, and `stewctl logs` must. It
+/// comes from opening the publisher's metadata to format a message, which
+/// `EvtQuery` and `EvtRender` never do: rendering as XML or as values
+/// returns the full `EventData`, and the right `RenderingInfo` besides. Only
+/// `EvtFormatMessage` and `EvtOpenPublisherMetadata` fail, and nothing here
+/// needs either. Still unknown, and worth a look before this is called
+/// settled: how Event Viewer's own General tab shows an event whose
+/// publisher has no metadata.
+///
+/// Sorted and deduplicated, so that the same set of users gives the same
+/// bytes however they were enumerated: that is what lets the caller decide
+/// there is nothing to import by comparing what it would write against what
+/// is already on disk. A SID that is not [`is_sid`] is dropped.
+pub fn manifest(sids: &[String], resource_file: &str) -> String {
+    let mut sids: Vec<&str> = sids
+        .iter()
+        .map(String::as_str)
+        .filter(|sid| is_sid(sid))
+        .collect();
+    sids.sort_unstable();
+    sids.dedup();
+
+    let file = escape(resource_file);
+    let mut out = String::from(HEADER);
+    for sid in sids {
+        out.push_str(&format!(
+            r#"      <provider name="{provider}"
+                guid="{guid}"
+                symbol="PROVIDER_{symbol}"
+                resourceFileName="{file}"
+                messageFileName="{file}">
+        <channels>
+          <channel name="{channel}"
+                   chid="CHANNEL_{symbol}"
+                   symbol="CHANNEL_{symbol}"
+                   type="Operational"
+                   enabled="true"
+                   value="{value}"
+                   isolation="Custom"
+                   access="{access}">
+            <logging>
+              <autoBackup>false</autoBackup>
+              <retention>false</retention>
+              <maxSize>{size}</maxSize>
+            </logging>
+          </channel>
+        </channels>
+      </provider>
+"#,
+            provider = provider_name(sid),
+            guid = provider_guid(sid),
+            symbol = symbol(sid),
+            channel = channel_name(sid),
+            value = CHANNEL_VALUE,
+            access = channel_access(sid),
+            size = CHANNEL_MAX_SIZE,
+        ));
+    }
+    out.push_str(FOOTER);
+    out
+}
+
+/// The SIDs a manifest declares channels for, in the order it declares them.
+///
+/// Reading the previous manifest back is how a run keeps the channels the
+/// runs before it made: the users signed in now are added to these rather
+/// than replacing them. A scan for the one attribute that carries a SID,
+/// rather than an XML parser, because this crate wrote the file and every
+/// SID in it is [`is_sid`]; anything else in there is not one of ours and is
+/// ignored.
+pub fn sids_in(manifest: &str) -> Vec<String> {
+    const PREFIX: &str = "<channel name=\"Steward/";
+    manifest
+        .match_indices(PREFIX)
+        .filter_map(|(at, _)| {
+            let rest = &manifest[at + PREFIX.len()..];
+            let sid = &rest[..rest.find('"')?];
+            is_sid(sid).then(|| sid.to_string())
+        })
+        .collect()
+}
+
+/// A SID as a C identifier, for the `symbol` and `chid` a manifest gives a
+/// provider and a channel: neither may hold a hyphen, and a SID is otherwise
+/// `S` and digits.
+fn symbol(sid: &str) -> String {
+    sid.replace('-', "_")
+}
+
+/// The five characters XML reserves. Only the resource file's path can hold
+/// one of them -- a SID cannot -- but a path is whatever the binary was
+/// installed as.
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ONE: &str = "S-1-5-21-2571842103-1957994488-3489912835-1001";
+    const TWO: &str = "S-1-5-21-2571842103-1957994488-3489912835-1002";
+    const EXE: &str = r"C:\Program Files\steward\steward.exe";
+
+    fn of(sids: &[&str]) -> String {
+        manifest(&sids.iter().map(|s| s.to_string()).collect::<Vec<_>>(), EXE)
+    }
+
+    /// What the caller writes to disk and hands `wevtutil im`: one provider
+    /// and one channel for the one user, named and numbered as the shim
+    /// expects, and no event template anywhere in it.
+    #[test]
+    fn a_manifest_for_one_user() {
+        let text = of(&[ONE]);
+        assert!(text.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"));
+        assert!(text.contains(&format!("name=\"Steward-{ONE}\"")));
+        assert!(text.contains(&format!("guid=\"{}\"", provider_guid(ONE))));
+        assert!(text.contains(&format!("<channel name=\"Steward/{ONE}\"")));
+        assert!(text.contains("value=\"16\""));
+        assert!(text.contains("type=\"Operational\""));
+        assert!(text.contains("isolation=\"Custom\""));
+        assert!(text.contains(&format!("access=\"{}\"", channel_access(ONE))));
+        assert!(text.contains(&format!("<maxSize>{CHANNEL_MAX_SIZE}</maxSize>")));
+        assert!(text.contains(&format!("resourceFileName=\"{EXE}\"")));
+        // TraceLogging: channels only.
+        assert!(!text.contains("<template"));
+        assert!(!text.contains("<event "));
+        assert!(!text.contains("<localization"));
+        assert!(text.ends_with("</instrumentationManifest>\n"));
+    }
+
+    /// `eventman.xsd` makes `<logging>` a sequence, so its three elements
+    /// have one legal order and a manifest in any other is rejected by
+    /// `wevtutil im`. Checked here because the schema is not, in CI.
+    #[test]
+    fn the_logging_elements_are_in_the_schemas_order() {
+        let text = of(&[ONE]);
+        let at = |tag: &str| text.find(tag).expect(tag);
+        assert!(at("<autoBackup>") < at("<retention>"));
+        assert!(at("<retention>") < at("<maxSize>"));
+    }
+
+    /// Symbols and channel ids are C identifiers, and differ between users:
+    /// two providers in one manifest may not share either.
+    #[test]
+    fn symbols_are_identifiers_and_unique() {
+        let text = of(&[ONE, TWO]);
+        for sid in [ONE, TWO] {
+            let symbol = symbol(sid);
+            assert!(!symbol.contains('-'));
+            assert!(text.contains(&format!("symbol=\"PROVIDER_{symbol}\"")));
+            assert!(text.contains(&format!("chid=\"CHANNEL_{symbol}\"")));
+        }
+        assert_ne!(symbol(ONE), symbol(TWO));
+    }
+
+    /// The same users give the same bytes whatever order they arrived in,
+    /// and duplicates collapse. This is the whole of the caller's
+    /// idempotence: an unchanged manifest is an import that does not happen.
+    #[test]
+    fn the_same_users_give_the_same_bytes() {
+        let expected = of(&[ONE, TWO]);
+        assert_eq!(of(&[TWO, ONE]), expected);
+        assert_eq!(of(&[ONE, TWO, ONE, TWO]), expected);
+        assert_ne!(of(&[ONE]), expected);
+    }
+
+    /// A round trip: the SIDs read back out of a manifest are the SIDs that
+    /// went in, which is how the next run keeps the channels this one made.
+    #[test]
+    fn the_sids_read_back() {
+        assert_eq!(sids_in(&of(&[ONE, TWO])), vec![ONE, TWO]);
+        assert_eq!(sids_in(&of(&[])), Vec::<String>::new());
+        assert_eq!(sids_in(""), Vec::<String>::new());
+        assert_eq!(sids_in("nothing of ours"), Vec::<String>::new());
+    }
+
+    /// A user who signs out keeps their channel: the next run unions what it
+    /// read with the sessions it found, so the manifest only ever grows.
+    #[test]
+    fn a_manifest_only_grows() {
+        let first = of(&[ONE]);
+        let mut sids = sids_in(&first);
+        sids.push(TWO.to_string());
+        let second = manifest(&sids, EXE);
+        // Additive: everything the first declared, the second still does.
+        assert!(second.contains(&format!("<channel name=\"Steward/{ONE}\"")));
+        assert!(second.contains(&format!("<channel name=\"Steward/{TWO}\"")));
+        // And ONE alone, signed out, is still there the run after.
+        assert_eq!(sids_in(&manifest(&sids_in(&second), EXE)), vec![ONE, TWO]);
+    }
+
+    /// Nothing that is not a SID reaches the XML or the SDDL.
+    #[test]
+    fn rubbish_is_dropped_not_escaped() {
+        let text = manifest(
+            &[
+                "S-1-5-18\"/><x a=\"".to_string(),
+                "CALEB".to_string(),
+                ONE.to_string(),
+            ],
+            EXE,
+        );
+        assert!(!text.contains("<x "));
+        assert!(!text.contains("CALEB"));
+        assert_eq!(sids_in(&text), vec![ONE]);
+    }
+
+    /// The one field that can hold a reserved character is escaped.
+    #[test]
+    fn the_resource_path_is_escaped() {
+        let text = manifest(&[ONE.to_string()], r"C:\a & b\steward.exe");
+        assert!(text.contains(r#"resourceFileName="C:\a &amp; b\steward.exe""#));
+        assert!(!text.contains("& b"));
+    }
+
+    /// The user, Administrators and SYSTEM; not Everyone, not Users, and no
+    /// clear right for the user.
+    #[test]
+    fn the_access_descriptor_names_three() {
+        let sddl = channel_access(ONE);
+        assert_eq!(
+            sddl,
+            format!("O:BAG:SYD:(A;;0xf0007;;;SY)(A;;0x7;;;BA)(A;;0x3;;;{ONE})")
+        );
+        assert!(!sddl.contains(";WD)"));
+        assert!(!sddl.contains(";BU)"));
+        assert!(!sddl.contains(";IU)"));
+        assert_ne!(channel_access(TWO), sddl);
+    }
+}
