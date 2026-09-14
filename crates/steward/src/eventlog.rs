@@ -218,6 +218,12 @@ pub fn provision(size: ChannelSize) -> io::Result<Report> {
     // whose size changed in the manifest alone, above -- is put right here
     // without one. So a size set by hand with `wevtutil sl /ms:` lasts until
     // the next run, and the size to make last is the one the task is given.
+    //
+    // A size smaller than a channel's file has already grown to is set all
+    // the same (seen, 2026-09-14, #34): `sl` succeeds and `gl` reads the new
+    // size back at once, but the file keeps its size and its records, and
+    // wraps at the size it had reached until the channel is cleared. So the
+    // size reads as right from the next run on, while the file is larger.
     let mut access_set = 0;
     let mut size_set = 0;
     for sid in &after {

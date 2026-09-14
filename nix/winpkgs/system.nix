@@ -88,6 +88,13 @@ in
         less. Changing it resizes every existing channel at the next apply,
         without re-creating any, and every logon after puts back a size
         changed by hand.
+
+        A smaller size takes nothing away from what a channel already holds:
+        a channel whose file has grown past it keeps that file and every
+        record in it, and goes on overwriting its oldest records at the size
+        the file had reached. Clearing it (`wevtutil cl Steward/<SID>`, as an
+        administrator, which loses those records) gives the disk back, and
+        from then on the channel grows no further than the new size.
       '';
     };
   };
