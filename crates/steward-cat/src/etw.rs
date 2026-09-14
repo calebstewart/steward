@@ -1,5 +1,11 @@
 //! The provider: registered with ETW, told when a session enables it, and
 //! writing the two TraceLogging events.
+//!
+//! The shim registers one for the unit it carries; the manager registers one
+//! for itself and writes its lines about every `StandardOutput=eventlog`
+//! unit through it, as the [`Stream::Steward`] stream. Both address the same
+//! provider GUID, the user's, so the unit's name is a field of each event
+//! rather than a property of the registration.
 
 use std::ffi::c_void;
 use std::io;
@@ -23,10 +29,20 @@ use windows_sys::Win32::System::Threading::SetEvent;
 use crate::tlg::{self, IN_CSTR16, IN_U64};
 use crate::{utf16, Stream};
 
-/// `WINEVENT_LEVEL_INFO`: a unit's output.
-const LEVEL_OUTPUT: u8 = 4;
 /// `WINEVENT_LEVEL_WARNING`: output was lost.
 const LEVEL_DROPPED: u8 = 3;
+
+/// An event's level, as Event Viewer files it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum Level {
+    /// `WINEVENT_LEVEL_ERROR`.
+    Error = 2,
+    /// `WINEVENT_LEVEL_WARNING`.
+    Warning = 3,
+    /// `WINEVENT_LEVEL_INFO`: a unit's output.
+    Info = 4,
+}
 
 /// Where the events go, fixed at startup.
 pub struct Channel<'a> {
@@ -49,21 +65,21 @@ pub struct Provider {
     traits: Vec<u8>,
     output: Vec<u8>,
     dropped: Vec<u8>,
-    /// The unit's name, nul-terminated UTF-16.
-    unit: Vec<u16>,
-    /// "stdout" and "stderr", nul-terminated UTF-16, by `Stream as usize`.
-    streams: [Vec<u16>; 2],
+    /// "stdout", "stderr" and "steward", nul-terminated UTF-16, by
+    /// `Stream as usize`.
+    streams: [Vec<u16>; 3],
     /// Writes ETW refused, and the last error it gave.
     refused: AtomicU64,
     last_error: AtomicU32,
 }
 
 impl Provider {
-    /// Registers the provider. `wake` is set each time a session enables it,
-    /// including from inside this call if one already has.
-    pub fn register(at: &Channel, unit: &str, wake: HANDLE) -> io::Result<Provider> {
+    /// Registers the provider. `wake`, if given, is set each time a session
+    /// enables it, including from inside this call if one already has.
+    pub fn register(at: &Channel, wake: Option<HANDLE>) -> io::Result<Provider> {
         let guid = GUID::from_u128(at.guid);
         let mut handle: REGHANDLE = 0;
+        let wake = wake.unwrap_or(std::ptr::null_mut());
         // SAFETY: `on_enable` only uses its context as an event handle to
         // set, which the caller keeps open until the provider is dropped.
         let err = unsafe { EventRegister(&guid, Some(on_enable), wake.cast_const(), &mut handle) };
@@ -91,10 +107,10 @@ impl Provider {
                     (FIELD_DROPPED, IN_U64, 0),
                 ],
             ),
-            unit: utf16::cstr(unit),
             streams: [
                 utf16::cstr(Stream::Stdout.name()),
                 utf16::cstr(Stream::Stderr.name()),
+                utf16::cstr(Stream::Steward.name()),
             ],
             refused: AtomicU64::new(0),
             last_error: AtomicU32::new(0),
@@ -114,32 +130,38 @@ impl Provider {
     /// Whether a session is listening for the events: otherwise they would be
     /// discarded, with `EventWrite` still returning success.
     pub fn listening(&self) -> bool {
-        unsafe { EventProviderEnabled(self.handle, LEVEL_OUTPUT, self.keyword) }
+        unsafe { EventProviderEnabled(self.handle, Level::Info as u8, self.keyword) }
     }
 
-    /// Writes one line of a stream, as nul-terminated UTF-16 from
-    /// [`utf16::encode`]: fields `unit`, `stream`, `bytes`. Returns whether
-    /// ETW took it.
-    pub fn output(&self, stream: Stream, text: &[u16]) -> bool {
+    /// Writes one line of a stream of `unit`, both as nul-terminated UTF-16
+    /// ([`utf16::cstr`], [`utf16::encode`]): fields `unit`, `stream`,
+    /// `bytes`. Returns whether ETW took it.
+    pub fn output(&self, unit: &[u16], stream: Stream, text: &[u16]) -> bool {
+        self.output_at(Level::Info, unit, stream, text)
+    }
+
+    /// [`output`](Self::output) at a level of the caller's: the manager's
+    /// line saying a unit failed is an error, not information.
+    pub fn output_at(&self, level: Level, unit: &[u16], stream: Stream, text: &[u16]) -> bool {
         self.write(
-            LEVEL_OUTPUT,
+            level as u8,
             &self.output,
             &[
-                descriptor(&self.unit),
+                descriptor(unit),
                 descriptor(&self.streams[stream as usize]),
                 descriptor(text),
             ],
         )
     }
 
-    /// Writes how many bytes of a stream were lost: fields `unit`, `stream`,
-    /// `dropped`. Returns whether ETW took it.
-    pub fn dropped(&self, stream: Stream, bytes: u64) -> bool {
+    /// Writes how many bytes of a stream of `unit` were lost: fields `unit`,
+    /// `stream`, `dropped`. Returns whether ETW took it.
+    pub fn dropped(&self, unit: &[u16], stream: Stream, bytes: u64) -> bool {
         self.write(
             LEVEL_DROPPED,
             &self.dropped,
             &[
-                descriptor(&self.unit),
+                descriptor(unit),
                 descriptor(&self.streams[stream as usize]),
                 descriptor(&[bytes]),
             ],

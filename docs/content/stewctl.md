@@ -248,6 +248,11 @@ Until your channel exists, `logs` says so and exits 1. A task creates it at
 sign-in; on the first sign-in after an install that is a few seconds after
 the manager has started, and from then on it is there before the manager is.
 
+If the manager cannot start a unit's `steward-cat` at all, that unit's output
+falls back to its log file for the run, and `stewctl status` says so. `logs`
+then reads the file, as for any `file` unit: it asks the manager where the
+output went for this run rather than trusting the unit file alone.
+
 ## verify
 
 ```console

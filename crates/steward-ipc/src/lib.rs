@@ -105,6 +105,12 @@ pub struct UnitStatus {
     /// A timer's schedule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timer: Option<TimerStatus>,
+    /// Set for a `StandardOutput=eventlog` unit whose output goes to its log
+    /// file for this run instead of the channel, and why: its `steward-cat`
+    /// could not be started, or exited with the unit still running. `stewctl`
+    /// reads the file rather than the channel while this is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_fallback: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

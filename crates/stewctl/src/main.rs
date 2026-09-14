@@ -344,13 +344,18 @@ fn status(units: Vec<String>) -> Outcome {
         print_unit(unit);
         println!();
         // Where its output goes is in its unit file, at the path the manager
-        // loaded it from.
-        let lines = match output_of(Path::new(&unit.path)) {
-            Output::EventLog => channel_tail(&unit.name, 10),
-            Output::File => match &log_dir {
+        // loaded it from -- unless the manager says it fell back to the file
+        // for this run (its steward-cat could not start), in which case the
+        // file is where the output is.
+        let to_channel =
+            output_of(Path::new(&unit.path)) == Output::EventLog && unit.output_fallback.is_none();
+        let lines = if to_channel {
+            channel_tail(&unit.name, 10)
+        } else {
+            match &log_dir {
                 Some(dir) => tail(&dir.join(format!("{}.log", unit.name)), 10),
                 None => Vec::new(),
-            },
+            }
         };
         for line in lines {
             println!("{line}");
@@ -450,6 +455,9 @@ fn print_unit(unit: &UnitStatus) {
     if !unit.wanted_by.is_empty() {
         println!("  Wanted by: {}", unit.wanted_by.join(" "));
     }
+    if let Some(why) = &unit.output_fallback {
+        println!("     Output: its log file this run, not the Event Log: {why}");
+    }
 }
 
 /// Wait until none of `units` is on its way up; report where each ended.
@@ -542,12 +550,20 @@ struct LogView {
     /// Each unit's file, for those that have one: a log can outlive its
     /// unit.
     files: BTreeMap<String, PathBuf>,
+    /// Units whose file says `eventlog` but whose output the manager put in
+    /// their log file for this run (their `steward-cat` could not start), so
+    /// the file, not the channel, is what to read.
+    fell_back: BTreeSet<String>,
     from_manager: bool,
 }
 
 impl LogView {
-    /// Where `unit`'s output goes, by its unit file.
+    /// Where `unit`'s output goes: its unit file, unless the manager reports
+    /// it fell back to the file this run.
     fn output(&self, unit: &str) -> Output {
+        if self.fell_back.contains(unit) {
+            return Output::File;
+        }
         self.files
             .get(unit)
             .map(|file| output_of(file))
@@ -564,6 +580,12 @@ fn log_view() -> Result<LogView, String> {
         return Ok(LogView {
             dir: PathBuf::from(manager.log_dir),
             units: response.units.iter().map(|u| u.name.clone()).collect(),
+            fell_back: response
+                .units
+                .iter()
+                .filter(|u| u.output_fallback.is_some())
+                .map(|u| u.name.clone())
+                .collect(),
             files: response
                 .units
                 .into_iter()
@@ -597,6 +619,8 @@ fn log_view() -> Result<LogView, String> {
         dir,
         units,
         files,
+        // No manager: nothing has run, so nothing has fallen back.
+        fell_back: BTreeSet::new(),
         from_manager: false,
     })
 }

@@ -21,3 +21,4 @@ steward-unit = { path = "crates/steward-unit" }
 steward-eventlog = { path = "crates/steward-eventlog" }
 steward-supervisor = { path = "crates/steward-supervisor" }
 steward-ipc = { path = "crates/steward-ipc" }
+steward-cat = { path = "crates/steward-cat" }

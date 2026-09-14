@@ -201,6 +201,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "steward-cat",
  "steward-eventlog",
  "steward-ipc",
  "steward-supervisor",

@@ -160,6 +160,11 @@ pub struct SavedUnit {
     pub main: Option<SavedProcess>,
     /// Every process in the job when it was last saved, the main one included.
     pub processes: Vec<SavedProcess>,
+    /// A `StandardOutput=eventlog` unit whose output goes to its file for
+    /// this run, and why: the `steward-cat` could not be started. The next
+    /// manager's status says so too, rather than claiming the channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_fallback: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,8 +255,17 @@ mod tests {
                         created: 9,
                     },
                 ],
+                output_fallback: None,
             },
         );
+        save(&file, &saved).unwrap();
+        assert_eq!(load(&file).unwrap(), saved);
+        // A state from before fallbacks were recorded still loads, and one
+        // that records a fallback keeps it.
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(!text.contains("output_fallback"), "{text}");
+        saved.units.get_mut("whkd.service").unwrap().output_fallback =
+            Some("steward-cat.exe does not exist".into());
         save(&file, &saved).unwrap();
         assert_eq!(load(&file).unwrap(), saved);
         // A state from before targets were saved still loads.

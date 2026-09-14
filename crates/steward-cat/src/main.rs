@@ -181,6 +181,8 @@ handles are closed.";
     /// closed: fields drop in order.
     struct Shared {
         provider: Provider,
+        /// The unit's name, nul-terminated UTF-16: every event's first field.
+        unit: Vec<u16>,
         pending: Mutex<Held>,
         wake: Wake,
         /// Readers whose pipe has closed.
@@ -197,20 +199,26 @@ handles are closed.";
 
     impl Held {
         /// Writes one line.
-        fn write(provider: &Provider, text: &mut Vec<u16>, stream: Stream, data: &[u8]) -> bool {
+        fn write(
+            provider: &Provider,
+            unit: &[u16],
+            text: &mut Vec<u16>,
+            stream: Stream,
+            data: &[u8],
+        ) -> bool {
             utf16::encode(data, text);
-            provider.output(stream, text)
+            provider.output(unit, stream, text)
         }
 
         /// Writes what is held, if a session listens. Returns whether nothing
         /// is left to write.
-        fn flush(&mut self, provider: &Provider) -> bool {
+        fn flush(&mut self, provider: &Provider, unit: &[u16]) -> bool {
             let Held { pending, text } = self;
             pending.is_empty()
                 || (provider.listening()
                     && pending.drain(
-                        |stream, data| Held::write(provider, text, stream, data),
-                        |stream, bytes| provider.dropped(stream, bytes),
+                        |stream, data| Held::write(provider, unit, text, stream, data),
+                        |stream, bytes| provider.dropped(unit, stream, bytes),
                     ))
         }
     }
@@ -224,8 +232,8 @@ handles are closed.";
         /// before it; holds it otherwise. Under the lock, so what is held and
         /// what is written stay in the order they were read.
         fn emit(&self, held: &mut Held, stream: Stream, data: &[u8]) {
-            if self.provider.listening() && held.flush(&self.provider) {
-                if !Held::write(&self.provider, &mut held.text, stream, data) {
+            if self.provider.listening() && held.flush(&self.provider, &self.unit) {
+                if !Held::write(&self.provider, &self.unit, &mut held.text, stream, data) {
                     // Said so by the next event that gets through.
                     held.pending.lose(stream, data.len() as u64);
                 }
@@ -235,7 +243,7 @@ handles are closed.";
         }
 
         fn flush(&self) {
-            self.held().flush(&self.provider);
+            self.held().flush(&self.provider, &self.unit);
         }
     }
 
@@ -249,9 +257,10 @@ handles are closed.";
             keyword: CHANNEL_KEYWORD,
         };
         let wake = Wake::new()?;
-        let provider = Provider::register(&channel, unit, wake.0)?;
+        let provider = Provider::register(&channel, Some(wake.0))?;
         let shared = Shared {
             provider,
+            unit: utf16::cstr(unit),
             pending: Mutex::new(Held {
                 pending: Pending::with_capacity(HOLD_MAX),
                 text: Vec::with_capacity(LINE_MAX + 1),

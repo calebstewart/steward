@@ -32,6 +32,13 @@ pub fn state_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("steward"))
 }
 
+/// The manager's log file, `%LOCALAPPDATA%\steward\steward.log`: also
+/// where a `steward-cat`'s own few words go, since they are about the
+/// manager's machinery rather than a unit's doing.
+pub fn path() -> Option<PathBuf> {
+    state_dir().map(|dir| dir.join("steward.log"))
+}
+
 /// Where a log goes when it is set aside: `steward.log` to `steward.log.1`.
 pub fn aside(path: &Path) -> PathBuf {
     path.with_extension("log.1")

@@ -272,35 +272,72 @@ large log costs no more than a small one. The price of files over a pipe is
 that service output carries
 no timestamps of its own.
 
-The Windows Event Log is where that output is going instead, one channel per
-user (`Steward/<their SID>`, granted to that user, administrators and
-SYSTEM), and the file stays the default while it gets there. Creating a
-channel needs an administrator, and the accounts that will sign in to a
-machine are not known to the one elevated step that registers the template,
-so the install declares a Scheduled Task as well: `steward
-provision-eventlog`, run as SYSTEM at the logon of any user, which
-regenerates a channels-only manifest from the sessions signed in and imports
-it. Its one argument, the size of every channel, is a literal in the task's
-action rather than anything a caller supplies, and it is idempotent -- it
-sets a size or a descriptor that has drifted without re-importing anything
+The Windows Event Log is the other place a unit's output can go, and a unit
+asks for it with `StandardOutput=eventlog`; the file stays the default.
+There is one channel per user (`Steward/<their SID>`, granted to that user,
+administrators and SYSTEM). Creating a channel needs an administrator, and
+the accounts that will sign in to a machine are not known to the one elevated
+step that registers the template, so the install declares a Scheduled Task as
+well: `steward provision-eventlog`, run as SYSTEM at the logon of any user,
+which regenerates a channels-only manifest from the sessions signed in and
+imports it. Its one argument, the size of every channel, is a literal in the
+task's action rather than anything a caller supplies, and it is idempotent --
+it sets a size or a descriptor that has drifted without re-importing anything
 -- which is what lets it carry a descriptor that users may run but not
-change. Declared by whatever installs
-steward -- `windows.scheduledTasks`, or the README's by-hand steps -- and not
-registered by steward itself, for the same reason the service is: a task
-winpkgs owns is deleted again when steward leaves a configuration, where a
-program that registered its own would leave one running as SYSTEM behind. `steward-eventlog` holds the
-names, the provider GUIDs and the manifest, because the task and the
-per-unit shim that writes the events have to agree on all three without
-talking to each other -- and, now, the events' own names and fields, because
-`stewctl logs` reads them back. The shim, `steward-cat`, writes one event
-per line and holds output until the channel's session is listening, which
-covers a first sign-in. `stewctl logs` and `status` read a unit's events
-with an XPath on the `unit` field, newest first for a tail and by
-subscription for `-f`, and never through the publisher's metadata, which the
-provider has none of; which of the two places a unit writes to is read off
-its unit file, `StandardOutput=`, so no manager is needed. What is still to
-come is the manager's side: starting the shim in the unit's job, and writing
-its own lines about the unit as events.
+change. Declared by whatever installs steward -- `windows.scheduledTasks`, or
+the README's by-hand steps -- and not registered by steward itself, for the
+same reason the service is: a task winpkgs owns is deleted again when steward
+leaves a configuration, where a program that registered its own would leave
+one running as SYSTEM behind. `steward-eventlog` holds the names, the provider
+GUIDs and the manifest, because the task and the per-unit shim that writes the
+events have to agree on all three without talking to each other -- and the
+events' own names and fields, because `stewctl logs` reads them back. `stewctl
+logs` and `status` read a unit's events with an XPath on the `unit` field,
+newest first for a tail and by subscription for `-f`, and never through the
+publisher's metadata, which the provider has none of; which of the two places
+a unit writes to is read off its unit file, `StandardOutput=`, so no manager
+is needed.
+
+A unit's output cannot go straight from its handle to a channel the way it
+goes to a file: something has to read the pipe and call `EventWrite`. That
+something must not be the manager -- a manager crash would then break every
+unit's output, the one thing the file model got right. So for each
+`StandardOutput=eventlog` unit the manager starts a `steward-cat` (in the
+spirit of `systemd-cat`): it hands the unit's processes the write ends of two
+pipes, stdout and stderr, and the shim the read ends, and the shim writes
+each line to the channel as one TraceLogging event with the fields `unit`,
+`stream` and `bytes`. The shim is **not** in the unit's job and **not** a
+supervised process: it is neither the main nor the control process, its exit
+is not the unit's, and the state machine never hears of it. What ties it to
+the unit is the pipes alone. The manager holds a write end too, and every
+process the unit starts inherits the others, so the shim reads until all of
+them are closed -- the manager's when the unit comes to rest or the manager
+exits, the processes' as they end. That is what carries it across a manager
+crash or a hand-over: the write ends stay open in the units and in the new
+manager once it adopts them, so the same shim reads on, its output unbroken,
+and it dies with the unit. The manager's own lines about the unit go to the
+channel too, as events of a `steward` stream from the manager's own
+registration of the provider, so a reader sees them between the output as
+they see the `-- steward:` marks in a file.
+
+The shim holds output in a bounded buffer until a session enables the
+provider -- an `EventWrite` to a channel nobody listens to is discarded and
+still returns success -- which is what covers an account's first sign-in,
+before the provisioning task has created the channel. The manager's own
+marks are held differently: it has no buffer, so a mark written while nobody
+listens goes to `steward.log` instead, beside the line saying nobody does,
+which is exactly what a reader diagnosing the race wants to find.
+
+If the shim cannot be started at all, the unit's output falls back to its
+file for that run, and both `steward.log` and `stewctl status` say so. If a
+running shim exits with the unit still going -- it crashed, or something
+ended it -- the running processes' output is lost from that moment (there is
+nothing left reading their pipe), and what the manager starts for the unit
+next writes to the file; that too is said in both places. `rotate_log` and
+the periodic size check skip a unit whose output is in the channel, since it
+has no file growing; a unit that has fallen back to its file is measured
+like any other. `steward.log` stays a file, always: the log that would
+explain the channel must not depend on it.
 
 ## Control plane
 
