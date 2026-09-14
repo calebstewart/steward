@@ -210,6 +210,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "steward-cat"
+version = "0.1.0"
+dependencies = [
+ "steward-eventlog",
+ "steward-ipc",
+ "windows-sys",
+]
+
+[[package]]
 name = "steward-eventlog"
 version = "0.1.0"
 
