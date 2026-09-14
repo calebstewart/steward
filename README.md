@@ -238,7 +238,12 @@ one.
 
 The last line runs it once for whoever is signed in already; everyone else
 gets a channel at their next sign-in. Running it again changes nothing unless
-somebody has signed in who had not before.
+somebody has signed in who had not before. Each run leaves an account of
+itself in `%ProgramData%\steward\provision-eventlog.log`. A channel the Event
+Log cannot enable -- seen once, for a channel whose session had been flooded
+for an hour, and importing it again did not help -- is named there and
+passed over, the others are provisioned regardless, and the run exits 1, so
+the task's last result shows it.
 
 `--channel-size` is the most each user's channel may hold before its oldest
 records are overwritten: bytes, or a whole number of `KiB`, `MiB` or `GiB`,
@@ -275,8 +280,11 @@ returning the events and their fields regardless. Nothing is lost by it;
 
 Channels only accumulate. Signing out keeps yours, which is the point -- the
 log outlives the session -- but so does deleting the account: its channel and
-its `.evtx` stay until someone removes them by hand (`wevtutil sl` and
-`wevtutil um`, or the uninstall below, which removes all of them).
+its `.evtx` stay until someone removes them, by hand or with the uninstall
+below, which removes all of them. By hand, delete the `.evtx` from
+`%SystemRoot%\System32\winevt\Logs` after `wevtutil um`, which leaves it
+there: a channel created again under the same name picks the old file back
+up, records and all.
 
 Windows starts an instance, `steward_<suffix>`, at every sign-in, so sign out
 and in. Anything a unit now runs should no longer be started by a Run key or
@@ -289,9 +297,10 @@ running), copy the new binaries in, and `sc start steward_<suffix>`; the new
 manager adopts them. To remove it: `steward.exe provision-eventlog
 --uninstall`, `schtasks /delete /tn steward-provision-eventlog /f`, `sc stop`
 and `sc delete` the instance, `sc delete steward`, and delete the directory.
-The uninstall removes every channel steward made, and a channel takes its
-records with it, so copy out anything
-you want to keep first.
+The uninstall removes every channel steward made and then deletes their
+`.evtx` files from `%SystemRoot%\System32\winevt\Logs`, which `wevtutil um`
+alone leaves behind, so copy out anything you want to keep first. It names
+any file it could not delete, and exits non-zero if there was one.
 
 ## License
 
