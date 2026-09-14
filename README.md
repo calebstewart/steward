@@ -94,7 +94,9 @@ stewctl switch             # re-read the units; restart the changed, start the n
 ```
 
 Each unit's output goes to `%LOCALAPPDATA%\steward\logs\<unit>.log`; the
-manager's own log is `%LOCALAPPDATA%\steward\steward.log`.
+manager's own log is `%LOCALAPPDATA%\steward\steward.log`. A unit with
+`StandardOutput=eventlog` writes to your Event Log channel instead, one per
+user; read it with Event Viewer or `Get-WinEvent`.
 
 ## Building
 
@@ -188,10 +190,14 @@ control below and leave your session without one until your next sign-in.
 
 ### The Event Log channels
 
-Each user's units write their output to an Event Log channel of their own,
-`Steward/<their SID>`, readable and writable by them, by administrators and
-by SYSTEM, and by nobody else, so one account on the machine cannot read
-another's. Creating a channel is administrative and the manager is not, and
+A unit whose file says `StandardOutput=eventlog` writes its output to an Event
+Log channel of that user's own, `Steward/<their SID>`, readable and writable
+by them, by administrators and by SYSTEM, and by nobody else, so one account
+on the machine cannot read another's. The file stays the default; this is
+opt-in per unit. The manager starts a small `steward-cat` for each such unit
+that reads its output and writes it to the channel, so a manager crash or an
+upgrade hand-over does not break the output. Creating a channel is
+administrative and the manager is not, and
 this install cannot know which accounts will ever sign in, so a Scheduled
 Task makes them as SYSTEM at the logon of any user. Still from the
 administrator prompt:

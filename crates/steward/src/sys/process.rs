@@ -1,15 +1,18 @@
 //! Starting a service's processes, and learning when they end.
 //!
-//! A process is created straight into its job (`PROC_THREAD_ATTRIBUTE_JOB_LIST`,
-//! so nothing it starts in its first instant escapes), inherits exactly two
-//! handles (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`: NUL for stdin, the unit's log
-//! for stdout and stderr), gets no console window, and gets the environment
-//! it is given.
+//! A unit's process is created straight into its job
+//! (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, so nothing it starts in its first
+//! instant escapes), inherits exactly the handles it is given
+//! (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`: NUL for stdin, and for stdout and
+//! stderr the unit's log, or the write ends of its pipes to a
+//! `steward-cat`), gets no console window, and gets the environment it is
+//! given. The `steward-cat` itself is started the same way, in no job and
+//! with no console, with the pipes' read ends beside its standard three.
 
 use std::ffi::c_void;
 use std::io;
 use std::mem::{size_of, size_of_val, zeroed};
-use std::os::windows::io::{AsRawHandle, OwnedHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
@@ -19,14 +22,15 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, OPEN_ALWAYS, OPEN_EXISTING,
 };
+use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess, GetProcessTimes,
     InitializeProcThreadAttributeList, OpenProcess, RegisterWaitForSingleObject, TerminateProcess,
     UnregisterWaitEx, UpdateProcThreadAttribute, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT,
-    EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, WT_EXECUTEONLYONCE,
+    DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE,
+    PROCESS_TERMINATE, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, WT_EXECUTEONLYONCE,
 };
 
 use super::job::Job;
@@ -144,40 +148,88 @@ pub fn open_null() -> io::Result<OwnedHandle> {
     }
 }
 
-/// Start `command_line` in `job`.
+/// How big a pipe from a unit to its `steward-cat` is asked to be: what the
+/// shim's stress runs used, and a comfortable margin over its one read.
+const PIPE_SIZE: u32 = 64 << 10;
+
+/// A pipe, both ends inheritable: the write end for a unit's processes, the
+/// read end for the `steward-cat` that carries their output. Which child
+/// gets which is the spawn's handle list, not the ends' inheritability.
+pub fn pipe() -> io::Result<(OwnedHandle, OwnedHandle)> {
+    let security = inheritable();
+    let (mut read, mut write): (HANDLE, HANDLE) = (null_mut(), null_mut());
+    check(unsafe { CreatePipe(&mut read, &mut write, &security, PIPE_SIZE) })?;
+    // SAFETY: both are open handles CreatePipe made for this process.
+    unsafe {
+        Ok((
+            OwnedHandle::from_raw_handle(read),
+            OwnedHandle::from_raw_handle(write),
+        ))
+    }
+}
+
+/// The handles a process is started with: exactly these, and nothing else
+/// of the manager's.
+pub struct Handles<'a> {
+    pub stdin: &'a OwnedHandle,
+    pub stdout: &'a OwnedHandle,
+    pub stderr: &'a OwnedHandle,
+    /// Inherited beside the standard three, for a program that takes handles
+    /// by number: a `steward-cat`'s two read ends.
+    pub also: &'a [&'a OwnedHandle],
+}
+
+/// Start `command_line`: in `job` if one is given; with `environment` and in
+/// `directory`, or the manager's own where not given; with a hidden console
+/// (`CREATE_NO_WINDOW`) or none at all (`DETACHED_PROCESS`).
 pub fn spawn(
     command_line: &str,
-    environment: &[u16],
-    directory: &Path,
-    job: &Job,
-    stdin: &OwnedHandle,
-    output: &OwnedHandle,
+    environment: Option<&[u16]>,
+    directory: Option<&Path>,
+    job: Option<&Job>,
+    handles: &Handles,
+    console: bool,
 ) -> io::Result<Child> {
     unsafe {
+        let attributes = 1 + u32::from(job.is_some());
         let mut size = 0usize;
-        InitializeProcThreadAttributeList(null_mut(), 2, 0, &mut size);
+        InitializeProcThreadAttributeList(null_mut(), attributes, 0, &mut size);
         let mut storage = vec![0u64; size.div_ceil(8)];
         let list = storage.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
-        check(InitializeProcThreadAttributeList(list, 2, 0, &mut size))?;
+        check(InitializeProcThreadAttributeList(
+            list, attributes, 0, &mut size,
+        ))?;
         let _cleanup = AttributeList(list);
 
-        let jobs = [job.raw()];
-        check(UpdateProcThreadAttribute(
-            list,
-            0,
-            PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
-            jobs.as_ptr() as *const c_void,
-            size_of_val(&jobs),
-            null_mut(),
-            null(),
-        ))?;
-        let handles = [stdin.as_raw_handle(), output.as_raw_handle()];
+        let jobs = job.map(|job| [job.raw()]);
+        if let Some(jobs) = &jobs {
+            check(UpdateProcThreadAttribute(
+                list,
+                0,
+                PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
+                jobs.as_ptr() as *const c_void,
+                size_of_val(jobs),
+                null_mut(),
+                null(),
+            ))?;
+        }
+        // Each handle once: stdout and stderr are usually the same one.
+        let mut inherited: Vec<HANDLE> = Vec::new();
+        for handle in [handles.stdin, handles.stdout, handles.stderr]
+            .into_iter()
+            .chain(handles.also.iter().copied())
+        {
+            let raw = handle.as_raw_handle();
+            if !inherited.contains(&raw) {
+                inherited.push(raw);
+            }
+        }
         check(UpdateProcThreadAttribute(
             list,
             0,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-            handles.as_ptr() as *const c_void,
-            size_of_val(&handles),
+            inherited.as_ptr() as *const c_void,
+            inherited.len() * size_of::<HANDLE>(),
             null_mut(),
             null(),
         ))?;
@@ -185,13 +237,18 @@ pub fn spawn(
         let mut startup: STARTUPINFOEXW = zeroed();
         startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
         startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-        startup.StartupInfo.hStdInput = stdin.as_raw_handle();
-        startup.StartupInfo.hStdOutput = output.as_raw_handle();
-        startup.StartupInfo.hStdError = output.as_raw_handle();
+        startup.StartupInfo.hStdInput = handles.stdin.as_raw_handle();
+        startup.StartupInfo.hStdOutput = handles.stdout.as_raw_handle();
+        startup.StartupInfo.hStdError = handles.stderr.as_raw_handle();
         startup.lpAttributeList = list;
 
         let mut line = wide(command_line);
-        let directory = wide(directory);
+        let directory = directory.map(wide);
+        let window = if console {
+            CREATE_NO_WINDOW
+        } else {
+            DETACHED_PROCESS
+        };
         let mut info: PROCESS_INFORMATION = zeroed();
         check(CreateProcessW(
             null(),
@@ -199,9 +256,9 @@ pub fn spawn(
             null(),
             null(),
             1,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
-            environment.as_ptr() as *const c_void,
-            directory.as_ptr(),
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | window,
+            environment.map_or(null(), |e| e.as_ptr() as *const c_void),
+            directory.as_ref().map_or(null(), |d| d.as_ptr()),
             &startup.StartupInfo,
             &mut info,
         ))?;

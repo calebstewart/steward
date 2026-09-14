@@ -136,8 +136,8 @@ pub enum Output {
     /// handle: the default, and always safe.
     #[default]
     File,
-    /// The user's Event Log channel, `Steward/<SID>`, through the
-    /// `steward-cat` shim in the unit's job.
+    /// The user's Event Log channel, `Steward/<SID>`, through a
+    /// `steward-cat` shim the manager starts for the unit.
     EventLog,
 }
 

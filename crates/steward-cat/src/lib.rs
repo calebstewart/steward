@@ -43,12 +43,18 @@ pub const UNIT_MAX: usize = 256;
 /// cost commit charge but no memory.
 pub const HOLD_MAX: usize = 1 << 20;
 
-/// One of a unit's two output streams.
+/// One of a unit's two output streams, or the manager's lines about it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Stream {
     Stdout = 0,
     Stderr = 1,
+    /// The manager's own lines about the unit -- started, exited, restarting
+    /// in 5 s, failed -- which go to the same channel as the output they
+    /// are about, as they go to the same file otherwise. Written by the
+    /// manager through its own registration of the provider, never by the
+    /// shim, so nothing is ever held under this stream.
+    Steward = 2,
 }
 
 impl Stream {
@@ -57,14 +63,15 @@ impl Stream {
         match self {
             Stream::Stdout => steward_eventlog::STREAM_STDOUT,
             Stream::Stderr => steward_eventlog::STREAM_STDERR,
+            Stream::Steward => steward_eventlog::STREAM_STEWARD,
         }
     }
 
     fn from_u8(b: u8) -> Stream {
-        if b == Stream::Stdout as u8 {
-            Stream::Stdout
-        } else {
-            Stream::Stderr
+        match b {
+            0 => Stream::Stdout,
+            2 => Stream::Steward,
+            _ => Stream::Stderr,
         }
     }
 }

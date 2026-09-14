@@ -17,15 +17,21 @@
 //! wall clock, so time asleep, a clock set right and a new time zone all
 //! count at once.
 
+use std::cell::{Cell, OnceCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{BuildHasher, Hasher};
 use std::io::Write;
-use std::os::windows::io::OwnedHandle;
+use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
+use steward_cat::etw::{Channel, Level, Provider};
+use steward_cat::{utf16, Stream};
+use steward_eventlog::{
+    channel_name, provider_guid, provider_name, CHANNEL_KEYWORD, CHANNEL_VALUE,
+};
 use steward_ipc::{ManagerStatus, Request, Response, TimerStatus, UnitStatus};
 use steward_supervisor::plan::{DEFAULT_TARGET, GRAPHICAL_TARGET, TIMERS_TARGET, TRAY_TARGET};
 use steward_supervisor::{
@@ -48,7 +54,7 @@ use crate::state::{
 use crate::sys::clock::{self, Local};
 use crate::sys::job::Job;
 use crate::sys::port::{Packet, Port, Waker};
-use crate::sys::process::{self, Child, ExitWatch};
+use crate::sys::process::{self, Child, ExitWatch, Handles};
 use crate::sys::{self, env, signal};
 
 /// A nudge: there are controls in the channel.
@@ -101,6 +107,34 @@ struct Tracked {
     _watch: ExitWatch,
 }
 
+/// Where a unit's output goes for one run: decided at the run's first
+/// spawn, let go of with its job.
+enum Output {
+    /// The user's Event Log channel, through a `steward-cat` the manager
+    /// started for the unit. The manager holds the write ends of the two
+    /// pipes to it and every process it starts for the unit inherits them;
+    /// the shim reads until every write end is closed -- the manager's with
+    /// the job, or with the manager itself, and the processes' as they exit
+    /// -- so it outlives a manager crash or hand-over for exactly as long as
+    /// the unit does, and dies with it.
+    ///
+    /// It is not in the unit's job. The pipe is what ties the shim to the
+    /// unit, and the job would only get in the way: the job would never be
+    /// empty while the shim ran; a stop that terminates the job would take
+    /// the shim with it and lose the unit's last lines, the ones worth
+    /// reading; and the Ctrl+C that asks the job's processes to exit would
+    /// end the shim first.
+    EventLog {
+        stdout: OwnedHandle,
+        stderr: OwnedHandle,
+        shim: Tracked,
+    },
+    /// A `StandardOutput=eventlog` unit whose `steward-cat` could not be
+    /// started, or exited: its output goes to its file for this run, and
+    /// this is why.
+    Fallback(String),
+}
+
 struct Unit {
     name: String,
     /// Its unit file is gone; it is forgotten once it is at rest.
@@ -126,6 +160,11 @@ struct Unit {
     /// Its log could not be set aside, and that has been said: once, not
     /// every time it is tried again.
     log_warned: bool,
+    /// Where this run's output goes, once a run has begun. `None` for a
+    /// `StandardOutput=file` unit, which opens its log at each spawn, and
+    /// for an eventlog unit adopted from another manager, whose pipes and
+    /// shim were that manager's.
+    output: Option<Output>,
 }
 
 impl Unit {
@@ -145,6 +184,7 @@ impl Unit {
             stopped_at: None,
             left_at_rest: false,
             log_warned: false,
+            output: None,
         }
     }
 
@@ -215,6 +255,13 @@ struct Manager {
     next_elapse: Option<SystemTime>,
     /// When the units' logs were last measured.
     logs_checked: Instant,
+    /// The manager's own registration of the user's Event Log provider,
+    /// made the first time a `StandardOutput=eventlog` unit has a line to
+    /// be written; `None` inside once registering has failed.
+    provider: OnceCell<Option<Provider>>,
+    /// Nobody listens to the provider, and that has been said: once, until
+    /// somebody does again.
+    channel_quiet: Cell<bool>,
 }
 
 /// How a manager ended.
@@ -272,6 +319,8 @@ pub fn run(port: Port, controls: Sender<Control>, inbox: Receiver<Control>) -> E
         startup: logon.unwrap_or_else(SystemTime::now),
         next_elapse: None,
         logs_checked: Instant::now(),
+        provider: OnceCell::new(),
+        channel_quiet: Cell::new(false),
     };
     manager.load_units();
     manager.adopt();
@@ -690,6 +739,10 @@ impl Manager {
             wanted_by: service.wanted_by.clone(),
             changed: unit.machine.is_changed(),
             timer: self.timer_status(slot),
+            output_fallback: match &unit.output {
+                Some(Output::Fallback(why)) => Some(why.clone()),
+                _ => None,
+            },
         }
     }
 
@@ -790,6 +843,9 @@ impl Manager {
             let unit = &mut self.units[slot];
             unit.job_empty_fed = false;
             unit.main = main;
+            // The last manager's pipes and shim went with it; its fallback,
+            // if it had one, is still where the processes write.
+            unit.output = record.output_fallback.clone().map(Output::Fallback);
             match pid {
                 Some(pid) => info!("{name}: adopted, main process {pid}"),
                 None => info!("{name}: adopted what is left of it; the main process is gone"),
@@ -1241,6 +1297,14 @@ impl Manager {
     }
 
     fn process_exited(&mut self, token: usize) {
+        // A shim's exit is not a unit's: it is not the main or the control
+        // process, and the machine never hears of it.
+        if let Some(slot) = self.units.iter().position(
+            |u| matches!(&u.output, Some(Output::EventLog { shim, .. }) if shim.token == token),
+        ) {
+            self.shim_exited(slot);
+            return;
+        }
         let found = self.units.iter().enumerate().find_map(|(slot, u)| {
             if u.main.as_ref().is_some_and(|t| t.token == token) {
                 Some((slot, Process::Main))
@@ -1427,11 +1491,24 @@ impl Manager {
         command: &Command,
         which: Process,
     ) -> std::io::Result<u32> {
-        if self.units[slot].job.is_none() {
-            self.rotate_log(slot);
+        let fresh = self.units[slot].job.is_none();
+        if fresh {
             self.new_job(slot)?;
         }
         let service = self.units[slot].machine.service().clone();
+        // A run's output is decided at its first spawn -- or, for a unit
+        // adopted from another manager, at this manager's first: the pipes
+        // and the shim were the other's and went with it, so what this one
+        // starts for the unit gets a shim of its own.
+        if service.standard_output == steward_unit::Output::EventLog
+            && self.units[slot].output.is_none()
+        {
+            self.open_channel(slot);
+        }
+        let to_channel = matches!(self.units[slot].output, Some(Output::EventLog { .. }));
+        if fresh && !to_channel {
+            self.rotate_log(slot);
+        }
         let vars = env::merge(env::user_environment()?, &service.environment);
         let directory = service
             .working_directory
@@ -1439,19 +1516,32 @@ impl Manager {
             .or_else(|| env::get(&vars, "USERPROFILE").map(str::to_owned))
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        let log = process::open_log(&self.log_path(slot).ok_or_else(no_state_dir)?)?;
         let stdin = self
             .stdin
             .as_ref()
             .ok_or_else(|| std::io::Error::other("no NUL handle"))?;
-        let job = self.units[slot].job.as_ref().expect("created above");
+        let unit = &self.units[slot];
+        let job = unit.job.as_ref().expect("created above");
+        let log;
+        let (stdout, stderr) = match &unit.output {
+            Some(Output::EventLog { stdout, stderr, .. }) => (stdout, stderr),
+            _ => {
+                log = process::open_log(&self.log_path(slot).ok_or_else(no_state_dir)?)?;
+                (&log, &log)
+            }
+        };
         let child = process::spawn(
             &command.line,
-            &env::block(&vars),
-            &directory,
-            job,
-            stdin,
-            &log,
+            Some(&env::block(&vars)),
+            Some(&directory),
+            Some(job),
+            &Handles {
+                stdin,
+                stdout,
+                stderr,
+                also: &[],
+            },
+            true,
         )?;
         let pid = child.pid;
         let tracked = match self.track(child) {
@@ -1486,6 +1576,126 @@ impl Manager {
         }
     }
 
+    /// A `StandardOutput=eventlog` unit's run begins: its pipes and its
+    /// `steward-cat`, or -- if the shim cannot be started -- its file, with
+    /// a word about why in both logs and in `stewctl status`.
+    fn open_channel(&mut self, slot: usize) {
+        let name = self.units[slot].name.clone();
+        match self.start_shim(&name) {
+            Ok(output) => {
+                if let Output::EventLog { shim, .. } = &output {
+                    info!(
+                        "{name}: steward-cat {} carries its output to the Event Log",
+                        shim.child.pid
+                    );
+                }
+                self.units[slot].output = Some(output);
+            }
+            Err(e) => {
+                warning!(
+                    "{name}: cannot start steward-cat ({e}); its output goes to its log file \
+                     for this run"
+                );
+                self.units[slot].output = Some(Output::Fallback(e.to_string()));
+                self.dirty = true;
+                self.mark(
+                    slot,
+                    &format!(
+                        "steward-cat could not be started ({e}); output goes to this file \
+                         instead of the Event Log for this run"
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Two pipes and a `steward-cat` reading them: in no job (see
+    /// [`Output::EventLog`]), with no console, its own few words going to
+    /// `steward.log`. It is given the read ends by number, and only those:
+    /// the write ends are for the unit's processes, and a copy of one in
+    /// the shim would keep it from ever seeing the end of the output.
+    fn start_shim(&mut self, name: &str) -> std::io::Result<Output> {
+        let exe = std::env::current_exe()?.with_file_name("steward-cat.exe");
+        if !exe.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{} does not exist", exe.display()),
+            ));
+        }
+        let (out_read, out_write) = process::pipe()?;
+        let (err_read, err_write) = process::pipe()?;
+        let stdin = self
+            .stdin
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("no NUL handle"))?;
+        let own_log = process::open_log(&crate::log::path().ok_or_else(no_state_dir)?)?;
+        let line = format!(
+            "{} {} {:#x} {:#x}",
+            quote(&exe.to_string_lossy()),
+            quote(name),
+            out_read.as_raw_handle() as usize,
+            err_read.as_raw_handle() as usize
+        );
+        let child = process::spawn(
+            &line,
+            None,
+            None,
+            None,
+            &Handles {
+                stdin,
+                stdout: &own_log,
+                stderr: &own_log,
+                also: &[&out_read, &err_read],
+            },
+            false,
+        )?;
+        // The shim has its copies of the read ends; the manager's close
+        // here, so that a shim that dies leaves the unit's writes failing
+        // rather than blocking on a pipe nobody drains.
+        drop((out_read, err_read));
+        let shim = match self.track(child) {
+            Ok(tracked) => tracked,
+            Err((child, e)) => {
+                let _ = child.terminate(KILLED);
+                return Err(e);
+            }
+        };
+        Ok(Output::EventLog {
+            stdout: out_write,
+            stderr: err_write,
+            shim,
+        })
+    }
+
+    /// The unit's `steward-cat` exited while the manager still held a write
+    /// end of its pipes, so not for the end of the output: it crashed, or
+    /// something ended it. The unit's running processes now write into a
+    /// pipe nobody reads, which is the one way an eventlog unit loses its
+    /// output, and there is nothing to be done for them; what the manager
+    /// starts for the unit from here on writes to the file instead.
+    fn shim_exited(&mut self, slot: usize) {
+        let Some(Output::EventLog { shim, .. }) = self.units[slot].output.take() else {
+            return;
+        };
+        let code = shim.child.exit_code().unwrap_or(STATUS_UNSUCCESSFUL);
+        let why = format!(
+            "steward-cat {} exited (0x{code:X}) with the unit still running",
+            shim.child.pid
+        );
+        drop(shim);
+        let name = self.units[slot].name.clone();
+        error!("{name}: {why}; its output from here on goes to its log file");
+        self.units[slot].output = Some(Output::Fallback(why.clone()));
+        self.dirty = true;
+        self.mark(
+            slot,
+            &format!(
+                "{why}: what its running processes write from now on is lost, and what \
+                 steward starts for it next writes to this file"
+            ),
+        );
+    }
+
     /// Every start (and every adoption) gets a fresh job.
     fn new_job(&mut self, slot: usize) -> std::io::Result<()> {
         let serial = self.next_serial;
@@ -1506,7 +1716,9 @@ impl Manager {
         Ok(())
     }
 
-    /// A unit at rest whose job is empty lets go of it.
+    /// A unit at rest whose job is empty lets go of it, and of the run's
+    /// output with it: the write ends close, and the shim, once the unit's
+    /// own copies have closed too, reads to the end and exits.
     fn release_job(&mut self, slot: usize) {
         let unit = &mut self.units[slot];
         if unit.job.is_some()
@@ -1516,6 +1728,10 @@ impl Manager {
             && unit.job_empty_fed
         {
             unit.job = None;
+            self.dirty = true;
+        }
+        if unit.job.is_none() && unit.output.is_some() {
+            unit.output = None;
             self.dirty = true;
         }
     }
@@ -1579,10 +1795,11 @@ impl Manager {
         };
         if after == State::Failed {
             error!("{name}: {line}");
+            self.mark_at(slot, Level::Error, &line);
         } else {
             info!("{name}: {line}");
+            self.mark(slot, &line);
         }
-        self.mark(slot, &line);
     }
 
     // ---- files ----------------------------------------------------------
@@ -1617,6 +1834,11 @@ impl Manager {
     /// a line written during the copy may be missing; at a start there is no
     /// writer, and nothing is lost.
     fn rotate_log(&mut self, slot: usize) {
+        // A unit writing to the Event Log has no file growing; one that has
+        // fallen back to its file has, and is measured like any other.
+        if matches!(self.units[slot].output, Some(Output::EventLog { .. })) {
+            return;
+        }
         let Some(path) = self.log_path(slot) else {
             return;
         };
@@ -1657,8 +1879,28 @@ impl Manager {
         }
     }
 
-    /// A line from steward itself in the unit's log, between its output.
+    /// A line from steward itself in the unit's log, between its output: in
+    /// its file or, for a `StandardOutput=eventlog` unit, in the channel, as
+    /// an event of the `steward` stream from the manager's own registration
+    /// of the user's provider.
     fn mark(&self, slot: usize, message: &str) {
+        self.mark_at(slot, Level::Info, message);
+    }
+
+    fn mark_at(&self, slot: usize, level: Level, message: &str) {
+        let unit = &self.units[slot];
+        let to_channel = unit.machine.service().standard_output == steward_unit::Output::EventLog
+            && !matches!(unit.output, Some(Output::Fallback(_)));
+        if to_channel {
+            if !self.mark_event(&unit.name, level, message) {
+                // Nobody listens -- the channel does not exist yet, or the
+                // Event Log service is restarting -- so the line goes here,
+                // beside the line saying that nobody does, which is what a
+                // reader wondering where the unit's lines went is after.
+                info!("{}: {message}", unit.name);
+            }
+            return;
+        }
         let Some(path) = self.log_path(slot) else {
             return;
         };
@@ -1672,6 +1914,62 @@ impl Manager {
             let line = format!("-- {} steward: {message}\n", crate::log::timestamp());
             let _ = file.write_all(line.as_bytes());
         }
+    }
+
+    /// Writes a mark as an event, if a session is listening for them. Says
+    /// once when none is, and once more each time that comes back.
+    fn mark_event(&self, unit: &str, level: Level, message: &str) -> bool {
+        let provider = self.provider.get_or_init(|| {
+            let sid = match steward_ipc::pipe::user_sid() {
+                Ok(sid) => sid,
+                Err(e) => {
+                    error!("cannot tell the user's SID, so no Event Log provider: {e}");
+                    return None;
+                }
+            };
+            let name = provider_name(&sid);
+            let channel = Channel {
+                guid: provider_guid(&sid).to_u128(),
+                name: &name,
+                channel: CHANNEL_VALUE,
+                keyword: CHANNEL_KEYWORD,
+            };
+            match Provider::register(&channel, None) {
+                Ok(provider) => {
+                    info!("registered {name}, to write to {}", channel_name(&sid));
+                    Some(provider)
+                }
+                Err(e) => {
+                    error!(
+                        "cannot register the Event Log provider {name} ({e}); steward's lines \
+                         about eventlog units go here"
+                    );
+                    None
+                }
+            }
+        });
+        let Some(provider) = provider else {
+            return false;
+        };
+        if !provider.listening() {
+            if !self.channel_quiet.replace(true) {
+                warning!(
+                    "no session listens to the Event Log provider: the channel has not been \
+                     created yet, or the Event Log service is restarting; steward's lines about \
+                     eventlog units go here until one does"
+                );
+            }
+            return false;
+        }
+        if self.channel_quiet.replace(false) {
+            info!("a session listens to the Event Log provider now");
+        }
+        provider.output_at(
+            level,
+            &utf16::cstr(unit),
+            Stream::Steward,
+            &utf16::cstr(message),
+        )
     }
 
     fn save_if_dirty(&mut self) {
@@ -1707,9 +2005,18 @@ impl Manager {
                 pid: t.child.pid,
                 created: t.child.created,
             });
-            saved
-                .units
-                .insert(unit.name.clone(), SavedUnit { main, processes });
+            let output_fallback = match &unit.output {
+                Some(Output::Fallback(why)) => Some(why.clone()),
+                _ => None,
+            };
+            saved.units.insert(
+                unit.name.clone(),
+                SavedUnit {
+                    main,
+                    processes,
+                    output_fallback,
+                },
+            );
         }
         saved.targets = self
             .units
@@ -1805,6 +2112,36 @@ fn no_state_dir() -> std::io::Error {
     std::io::Error::other("LOCALAPPDATA is not set; nowhere to put the unit's log")
 }
 
+/// `arg` as one argument of a Windows command line: as it is if nothing in
+/// it would split it, otherwise quoted the way `CommandLineToArgvW` (and so
+/// a Rust program's `args_os`) reads it back.
+fn quote(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '"']) {
+        return arg.to_owned();
+    }
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0;
+    for c in arg.chars() {
+        if c == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        // Backslashes count only before a quote, where they are doubled
+        // and the quote escaped.
+        let run = if c == '"' {
+            2 * backslashes + 1
+        } else {
+            backslashes
+        };
+        quoted.extend(std::iter::repeat_n('\\', run));
+        quoted.push(c);
+        backslashes = 0;
+    }
+    quoted.extend(std::iter::repeat_n('\\', 2 * backslashes));
+    quoted.push('"');
+    quoted
+}
+
 // ---- running in a console -------------------------------------------------
 
 static CONSOLE: OnceLock<(Sender<Control>, Waker)> = OnceLock::new();
@@ -1834,5 +2171,34 @@ pub fn run_console() {
     unsafe { SetConsoleCtrlHandler(Some(on_console_ctrl), 1) };
     if run(port, controls, inbox) != Ending::Stopped {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quote;
+
+    /// Each quoted form reads back as the argument: checked against what
+    /// `CommandLineToArgvW` does, which `std::env::args` follows.
+    #[test]
+    fn arguments_are_quoted_as_windows_reads_them() {
+        assert_eq!(quote("whkd.service"), "whkd.service");
+        assert_eq!(
+            quote(r"C:\steward\steward-cat.exe"),
+            r"C:\steward\steward-cat.exe"
+        );
+        assert_eq!(
+            quote(r"C:\Program Files\steward\steward-cat.exe"),
+            r#""C:\Program Files\steward\steward-cat.exe""#
+        );
+        assert_eq!(quote("my unit.service"), r#""my unit.service""#);
+        assert_eq!(quote(""), r#""""#);
+        // A trailing backslash is doubled so that it does not escape the
+        // closing quote; a quote is escaped, and the backslashes before it
+        // doubled.
+        assert_eq!(quote(r"a b\"), r#""a b\\""#);
+        assert_eq!(quote(r#"a"b"#), r#""a\"b""#);
+        assert_eq!(quote(r#"a\"b"#), r#""a\\\"b""#);
+        assert_eq!(quote(r"a\b c"), r#""a\b c""#);
     }
 }
