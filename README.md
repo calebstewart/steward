@@ -270,6 +270,9 @@ Viewer and `Get-WinEvent` alike, and doubling it is no escape there, so
 Event Viewer shows `％` where the program wrote `%`; `stewctl logs` prints
 `%` again.
 
+Terminal escape sequences, such as the colours a program writes, are taken
+out of each line before it goes into the channel.
+
 `--channel-size` is the most each user's channel may hold before its oldest
 records are overwritten: bytes, or a whole number of `KiB`, `MiB` or `GiB`,
 at least `1028KiB` (the least Windows allows, which `1MiB` is not), and

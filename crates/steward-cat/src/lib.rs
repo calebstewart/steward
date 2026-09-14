@@ -7,11 +7,12 @@
 //! whose own crash loses a unit's output, so it is small: two threads each
 //! reading one pipe, one event per line, and nothing allocated once they run.
 //!
-//! The pieces that are not Windows -- where a line ends, what is held while
-//! nobody listens, the text an event carries, TraceLogging's encoding --
-//! are here so their tests run anywhere; the ETW provider is [`etw`], and the
-//! program is `main.rs`.
+//! The pieces that are not Windows -- the escape sequences taken out, where a
+//! line ends, what is held while nobody listens, the text an event carries,
+//! TraceLogging's encoding -- are here so their tests run anywhere; the ETW
+//! provider is [`etw`], and the program is `main.rs`.
 
+pub mod escape;
 #[cfg(windows)]
 pub mod etw;
 pub mod lines;

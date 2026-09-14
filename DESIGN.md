@@ -340,6 +340,22 @@ not. The fullwidth sign renders on every path and is one UTF-16 unit, so a
 line's length is unchanged; a fullwidth sign a program wrote itself comes
 back from `stewctl` as `%`.
 
+Terminal escape sequences are taken out of the output as the shim reads it,
+before it is cut into lines or held. The Event Log keeps them as written,
+and nothing that reads a channel is a terminal: Event Viewer and
+`Get-WinEvent` show `[31mred[0m` where the program meant red, and
+`stewctl logs` would hand them to the reader's terminal, which lets a
+unit's output retitle the window or write the clipboard. The shim takes out
+ECMA-48's 7-bit forms as a terminal reads them -- control sequences
+(`ESC [` ... final byte), control strings (`ESC ]`, `ESC P` and the like, up
+to ST or BEL) and the other escapes (`ESC ( B`) -- and keeps every other
+byte, a tab, a lone `\r` and BEL among them. A byte that cannot continue a
+sequence ends it and is kept, and so is a line end, so a control string
+never finished costs the rest of its line and no more. The state carries
+from one read to the next, so a sequence split between reads, or across the
+cut of a line too long for one event, is taken out whole. A unit whose
+output goes to its file keeps them: the unit writes that file itself.
+
 If the shim cannot be started at all, the unit's output falls back to its
 file for that run, and both `steward.log` and `stewctl status` say so. If a
 running shim exits with the unit still going -- it crashed, or something

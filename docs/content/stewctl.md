@@ -241,6 +241,11 @@ A `%` in a line is kept in the channel as `％`, the fullwidth percent sign,
 because the Event Log shows most lines with a `%` in them as empty. Event
 Viewer and `Get-WinEvent` show `％`; `logs` prints `%` again.
 
+Terminal escape sequences — colours, cursor movement, window titles — are
+taken out of a line before it goes into the channel, so a program that
+colours its output shows as plain text in Event Viewer and in `logs`. A
+unit whose output goes to its file keeps them as the program wrote them.
+
 `logs` asks the running manager where each unit's output goes. With no
 manager it reads the unit file in `%APPDATA%\steward\units`, and for a unit
 that does not say, it reads the channel if you have one and the file if you

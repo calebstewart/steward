@@ -24,6 +24,7 @@ mod app {
     use std::sync::{Mutex, MutexGuard, PoisonError};
     use std::thread;
 
+    use steward_cat::escape::Stripper;
     use steward_cat::etw::{Channel, Provider};
     use steward_cat::pending::Pending;
     use steward_cat::{lines, utf16, Stream, HOLD_MAX, LINE_MAX, UNIT_MAX};
@@ -41,9 +42,9 @@ usage: steward-cat UNIT STDOUT STDERR
 
 Writes what arrives on the inherited handles STDOUT and STDERR (numbers,
 decimal or 0x-hex) to the Event Log channel of the user it runs as, one
-event per line with the fields unit, stream and bytes. Output is held
-while nobody listens and written once someone does. Exits when both
-handles are closed.";
+event per line with the fields unit, stream and bytes, and terminal escape
+sequences taken out. Output is held while nobody listens and written once
+someone does. Exits when both handles are closed.";
 
     /// How often main looks again while output is held, beside being woken
     /// when a session enables the provider: in case an enable is missed, and
@@ -313,12 +314,14 @@ handles are closed.";
         Ok(())
     }
 
-    /// Reads one stream until its pipe closes, an event per line. The buffer
-    /// is on this thread's stack: nothing here allocates.
+    /// Reads one stream until its pipe closes, an event per line, its escape
+    /// sequences taken out as it is read. The buffer is on this thread's
+    /// stack: nothing here allocates.
     fn pump(shared: &Shared, stream: Stream, input: &Input) {
         let mut buf = [0u8; LINE_MAX];
         // The start of a line still to come, at the front.
         let mut len = 0;
+        let mut escapes = Stripper::default();
         loop {
             let n = match input.read(&mut buf[len..]) {
                 Ok(Some(n)) => n,
@@ -329,7 +332,7 @@ handles are closed.";
                     break;
                 }
             };
-            len += n;
+            len += escapes.strip(&mut buf[len..len + n]);
             // Every line of one read under one lock. A full buffer always
             // gives up at least a byte, so the next read has room.
             let used = {
