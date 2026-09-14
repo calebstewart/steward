@@ -84,6 +84,15 @@ pub fn channel_access(sid: &str) -> String {
 /// different fault with the same symptom. `C:\Program Files\steward`, where
 /// steward installs, settles that one and not the other.
 ///
+/// A reader can sidestep the noise entirely, and `stewctl logs` must. It
+/// comes from opening the publisher's metadata to format a message, which
+/// `EvtQuery` and `EvtRender` never do: rendering as XML or as values
+/// returns the full `EventData`, and the right `RenderingInfo` besides. Only
+/// `EvtFormatMessage` and `EvtOpenPublisherMetadata` fail, and nothing here
+/// needs either. Still unknown, and worth a look before this is called
+/// settled: how Event Viewer's own General tab shows an event whose
+/// publisher has no metadata.
+///
 /// Sorted and deduplicated, so that the same set of users gives the same
 /// bytes however they were enumerated: that is what lets the caller decide
 /// there is nothing to import by comparing what it would write against what
