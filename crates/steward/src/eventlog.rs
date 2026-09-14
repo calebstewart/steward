@@ -23,17 +23,21 @@
 //! of them a channel), start on battery, and carry a security descriptor
 //! granting ordinary users read and execute but not write. That last one
 //! matters because the task runs as SYSTEM: a user who could rewrite its
-//! action could run anything as SYSTEM. It is safe to grant because this
-//! program takes no arguments and does the same thing every time.
+//! action could run anything as SYSTEM. It is safe to grant because whoever
+//! runs the task cannot change what it does. It takes one argument,
+//! `--channel-size`, but as a literal in the action the administrator
+//! declared: the action has no `$(Arg0)` for a caller's parameters to be
+//! substituted into, so running it on demand runs exactly that.
 //!
 //! Three things happen in a run, in order, and each is skipped when it has
 //! nothing to do:
 //!
 //! 1. the sessions signed in are enumerated and resolved to SIDs;
 //! 2. those, plus every SID the manifest already names, are written back as
-//!    the manifest, and it is imported if it changed or if a channel it
-//!    names has gone missing;
-//! 3. each channel's access descriptor is checked and set if it is wrong.
+//!    the manifest, and it is imported if it changed in anything but its
+//!    size, or if a channel it names has gone missing;
+//! 3. each channel's access descriptor and size are checked, and set if
+//!    they are wrong.
 //!
 //! Running it again with the same sessions writes nothing at all.
 
@@ -41,7 +45,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
-use steward_eventlog::{channel_access, channel_name, manifest, sids_in};
+use steward_eventlog::{channel_access, channel_name, manifest, sids_in, size_in, ChannelSize};
 
 use crate::sys::session;
 
@@ -122,8 +126,9 @@ impl Report {
     }
 }
 
-/// The argument-free run: what the task does at every logon.
-pub fn provision() -> io::Result<Report> {
+/// What the task does at every logon: a channel of `size` for everyone who
+/// is signed in or ever has been.
+pub fn provision(size: ChannelSize) -> io::Result<Report> {
     let mut report = Report::default();
     let path = manifest_path()?;
     let exe = std::env::current_exe()?;
@@ -144,7 +149,7 @@ pub fn provision() -> io::Result<Report> {
     let known = sids.len();
     sids.extend(found.sids.iter().cloned());
 
-    let text = manifest(&sids, &exe);
+    let text = manifest(&sids, &exe, size);
     let after = sids_in(&text);
     report.say(format!(
         "{} signed in, {known} known already, {} channels",
@@ -168,48 +173,79 @@ pub fn provision() -> io::Result<Report> {
     // import that only adds a provider leaves the others' registrations
     // exactly as they were, and an import that would change nothing does not
     // happen at all.
+    //
+    // Nor does one that would change only the size. If the file on disk is
+    // what this run would write at the size the file already has, the size
+    // is all that differs, and it is set on each channel below as the access
+    // descriptor is: re-importing every channel to change one number would
+    // be a heavier way of doing the same thing. The manifest is still
+    // written, because an import sets every channel it names to the size it
+    // says, existing channels included (seen, 2026-09-14): the next import --
+    // the next new user -- must not put the old size back.
+    let was = size_in(&before).unwrap_or(size);
+    let changed = manifest(&sids, &exe, was) != before;
     let missing: Vec<&String> = after.iter().filter(|sid| !exists(sid)).collect();
-    if text != before || !missing.is_empty() {
-        if text != before {
-            report.say(format!(
-                "manifest {} {}",
-                path.display(),
-                if before.is_empty() {
-                    "written"
-                } else {
-                    "updated"
-                }
-            ));
-        }
-        if !missing.is_empty() {
-            report.say(format!("{} channels to re-create", missing.len()));
-        }
+    if text != before {
+        report.say(format!(
+            "manifest {} {}",
+            path.display(),
+            if before.is_empty() {
+                "written".to_string()
+            } else if changed {
+                "updated".to_string()
+            } else {
+                format!("updated in its size alone, {was} to {size}")
+            }
+        ));
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(&path, &text)?;
+    }
+    if changed || !missing.is_empty() {
+        if !missing.is_empty() {
+            report.say(format!("{} channels to re-create", missing.len()));
+        }
         run(&["im", &path.to_string_lossy()])?;
         report.say("manifest imported");
     } else {
-        report.say("manifest unchanged, nothing to import");
+        report.say("nothing to import");
     }
 
-    // And the access descriptors, read back rather than assumed: the import
-    // sets them from the manifest, but a channel that was already there and
-    // whose descriptor was changed by hand or by policy is put right here
-    // without an import.
-    let mut set = 0;
+    // And the access descriptors and sizes, read back rather than assumed:
+    // an import sets both from the manifest, but a channel that was already
+    // there -- whose descriptor or size was changed by hand or by policy, or
+    // whose size changed in the manifest alone, above -- is put right here
+    // without one. So a size set by hand with `wevtutil sl /ms:` lasts until
+    // the next run, and the size to make last is the one the task is given.
+    let mut access_set = 0;
+    let mut size_set = 0;
     for sid in &after {
         let channel = channel_name(sid);
-        let wanted = channel_access(sid);
-        if access(&channel)?.as_deref() != Some(wanted.as_str()) {
-            run(&["sl", &channel, &format!("/ca:{wanted}")])?;
-            set += 1;
+        let listed = Listing::of(&channel);
+        let access = channel_access(sid);
+        let access_arg = format!("/ca:{access}");
+        let size_arg = format!("/ms:{}", size.bytes());
+        let mut args = vec!["sl", &channel];
+        if listed.access.as_deref() != Some(access.as_str()) {
+            args.push(&access_arg);
+            access_set += 1;
+        }
+        if listed.size != Some(size.bytes()) {
+            args.push(&size_arg);
+            size_set += 1;
+        }
+        if args.len() > 2 {
+            run(&args)?;
         }
     }
-    report.say(match set {
+    report.say(match access_set {
         0 => "access descriptors already right".to_string(),
         n => format!("{n} access descriptors set"),
+    });
+    report.say(match size_set {
+        0 => format!("sizes already {size}"),
+        n => format!("{n} channels resized to {size}"),
     });
 
     report.keep();
@@ -221,16 +257,36 @@ fn exists(sid: &str) -> bool {
     run(&["gl", &channel_name(sid)]).is_ok()
 }
 
-/// A channel's access descriptor as `wevtutil gl` reports it, or `None` if
-/// there is no such channel.
-fn access(channel: &str) -> io::Result<Option<String>> {
-    let Ok(listed) = run(&["gl", channel]) else {
-        return Ok(None);
-    };
-    Ok(listed
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("channelAccess:"))
-        .map(|sddl| sddl.trim().to_string()))
+/// What `wevtutil gl` says of a channel, as much of it as a run checks.
+/// Both `None` when there is no such channel.
+#[derive(Default, Debug, PartialEq)]
+struct Listing {
+    /// `channelAccess`, the channel's SDDL.
+    access: Option<String>,
+    /// `maxSize`, in bytes.
+    size: Option<u64>,
+}
+
+impl Listing {
+    fn of(channel: &str) -> Listing {
+        run(&["gl", channel])
+            .map(|listed| Listing::read(&listed))
+            .unwrap_or_default()
+    }
+
+    /// The two lines that matter, out of the rest of it.
+    fn read(listed: &str) -> Listing {
+        let field = |name: &str| {
+            listed
+                .lines()
+                .find_map(|line| line.trim().strip_prefix(name))
+                .map(str::trim)
+        };
+        Listing {
+            access: field("channelAccess:").map(str::to_string),
+            size: field("maxSize:").and_then(|bytes| bytes.parse().ok()),
+        }
+    }
 }
 
 /// The uninstall: every channel steward made, and everything in them.
@@ -260,16 +316,32 @@ pub fn uninstall() -> io::Result<Report> {
 
 #[cfg(test)]
 mod tests {
-    /// The one line of `wevtutil gl` that matters, out of the rest of it.
+    use super::Listing;
+
+    /// The descriptor and the size, off a listing laid out as `wevtutil gl`
+    /// lays one out (the Application channel's, 2026-09-14, with the
+    /// descriptor shortened).
     #[test]
-    fn the_descriptor_is_read_off_the_listing() {
-        let listing = "name: Steward/S-1-5-18\n  enabled: true\n  type: Operational\n  \
-             isolation: Custom\n  channelAccess: O:BAG:SYD:(A;;0x7;;;BA)\n  logging:\n    \
-             retention: false\n";
-        let found = listing
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("channelAccess:"))
-            .map(str::trim);
-        assert_eq!(found, Some("O:BAG:SYD:(A;;0x7;;;BA)"));
+    fn the_descriptor_and_size_are_read_off_the_listing() {
+        let listing = "name: Steward/S-1-5-18\r\nenabled: true\r\ntype: Operational\r\n\
+             owningPublisher: \r\nisolation: Custom\r\n\
+             channelAccess: O:BAG:SYD:(A;;0x7;;;BA)\r\nlogging:\r\n  \
+             logFileName: %SystemRoot%\\System32\\Winevt\\Logs\\Steward%4S-1-5-18.evtx\r\n  \
+             retention: false\r\n  autoBackup: false\r\n  maxSize: 67108864\r\n\
+             publishing:\r\n  fileMax: 1\r\n";
+        assert_eq!(
+            Listing::read(listing),
+            Listing {
+                access: Some("O:BAG:SYD:(A;;0x7;;;BA)".to_string()),
+                size: Some(64 << 20),
+            }
+        );
+    }
+
+    /// A listing missing either reads as wrong, and so is set.
+    #[test]
+    fn what_is_not_there_is_none() {
+        assert_eq!(Listing::read(""), Listing::default());
+        assert_eq!(Listing::read("logging:\n  maxSize: lots\n").size, None);
     }
 }

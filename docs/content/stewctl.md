@@ -239,8 +239,10 @@ runs — so it needs no manager for either. It reads the channel with
 `EvtQuery` and `EvtRender` only. steward's provider has no message file, so
 `wevtutil gp` and `Get-WinEvent` complain about that on every call; `logs`
 never goes through the part that complains. What a channel holds is bounded
-by its size, 64 MiB unless an administrator changes it, which is roughly
-50,000 lines for all of your units together; there is no `.log.1`.
+by its size, 64 MiB unless the install chose otherwise
+(`services.steward.eventlog.channelSize`, or `--channel-size` on the task),
+which is roughly 50,000 lines for all of your units together; there is no
+`.log.1`.
 
 Until your channel exists, `logs` says so and exits 1. A task creates it at
 sign-in; on the first sign-in after an install that is a few seconds after

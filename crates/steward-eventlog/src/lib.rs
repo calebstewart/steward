@@ -13,7 +13,7 @@
 //!
 //! - the provisioning task ([`manifest`], `steward provision-eventlog`)
 //!   writes the manifest that registers the provider and creates the
-//!   channel, as SYSTEM, at logon;
+//!   channel, as SYSTEM, at logon, at the [`ChannelSize`] the install chose;
 //! - the per-unit shim writes events to it, as the user, and must stamp each
 //!   one with [`CHANNEL_VALUE`] and address it to the same provider GUID.
 //!
@@ -22,8 +22,10 @@
 
 mod manifest;
 mod sha1;
+mod size;
 
-pub use manifest::{channel_access, manifest, sids_in};
+pub use manifest::{channel_access, manifest, sids_in, size_in};
+pub use size::ChannelSize;
 
 /// The value a channel is given in the manifest, and so the value an event's
 /// descriptor must carry in its `Channel` field for the Event Log to route
@@ -44,34 +46,6 @@ pub const CHANNEL_VALUE: u8 = 16;
 /// channel included, so the shim needs no keyword to be collected. Named so
 /// that the shim does not have to rediscover that.
 pub const CHANNEL_KEYWORD: u64 = 0;
-
-/// The size a channel's `.evtx` may reach before the oldest records are
-/// overwritten.
-///
-/// Windows' own default for a channel a manifest does not say, 1 MiB, is far
-/// too small, so this says.
-///
-/// **It is a budget in lines, not in bytes.** The shim writes one event per
-/// line, and an Event Log record costs 1.2 to 1.5 KB of `.evtx` however
-/// short the line is -- measured on a real channel (2026-09-14): 1,471 bytes
-/// a line at 4,800 lines a second, 1,215 at 77,000. Call it 700 to 850 lines
-/// per MiB and the length of the lines barely matters. So 64 MiB is roughly
-/// 45,000 to 55,000 lines, for all of a user's units together.
-///
-/// That is much less history than the files hold: a unit's log may reach 8
-/// MiB (`steward::log::CAP`) with another 8 MiB set aside, which at ordinary
-/// line lengths is a couple of hundred thousand lines, and that is *per
-/// unit*. A channel is per user. The gap is the medium's, not a number that
-/// can be tuned away -- matching it would want gigabytes per user under
-/// `%SystemRoot%\System32\Winevt\Logs` -- so what this number is chosen
-/// against is the disk instead: 64 MiB is what four units' logs can already
-/// occupy in a profile today.
-///
-/// An administrator can say otherwise -- `wevtutil sl Steward/<SID>
-/// /ms:<bytes>` -- but only until the next import, which is to say until
-/// somebody signs in who never has before; this is the number that comes
-/// back.
-pub const CHANNEL_MAX_SIZE: u64 = 64 << 20;
 
 /// The events in a channel, as the shim writes them and `stewctl logs`
 /// reads them back. Named here so that the writer and the reader cannot

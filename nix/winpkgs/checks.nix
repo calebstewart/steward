@@ -22,6 +22,14 @@ let
     ];
   };
 
+  # Other channel sizes (#31), and one Windows would raise -- 1 MiB, below
+  # its least of 1028 KiB -- which must not evaluate at all.
+  sized =
+    size: machine.extendModules { modules = [ { services.steward.eventlog.channelSize = size; } ]; };
+  kib = sized (1028 * 1024);
+  bytes = sized 100000000;
+  tooSmall = builtins.tryEval (sized (1024 * 1024)).config.services.steward.eventlog.channelSize;
+
   trigger = "whkdrc v1";
   user = winpkgs.lib.homeConfiguration {
     inherit system;
@@ -120,6 +128,9 @@ in
     pkgs.runCommand "steward-winpkgs-system"
       {
         doc = document machine;
+        kibDoc = document kib;
+        bytesDoc = document bytes;
+        tooSmallEvaluates = lib.boolToString tooSmall.success;
         closure = machine.config.system.build.toplevel;
         nativeBuildInputs = [ pkgs.jq ];
       }
@@ -144,9 +155,11 @@ in
         # The elevated install also declares the Event Log provisioning task
         # (#24). Declared, not registered by steward itself, so that it is
         # deleted again when steward leaves a configuration.
-        task() { jq -r --arg f "$1" '.resources[] | select(.type == "winpkgs/task") | .properties[$f] | tostring' <<<"$doc"; }
+        task() { jq -r --arg f "$1" '.resources[] | select(.type == "winpkgs/task") | .properties[$f] | tostring' <<<"''${2:-$doc}"; }
         test "$(task command)" = 'C:\Program Files\steward\steward.exe'
-        test "$(task arguments)" = 'provision-eventlog'
+        # The size is a literal in the action, which is what keeps it safe to
+        # let users run (#31).
+        test "$(task arguments)" = 'provision-eventlog --channel-size 64MiB'
         # As SYSTEM, at the logon of any user: no `user` on the trigger.
         test "$(task runAs)" = 'S-1-5-18'
         test "$(jq -r '.resources[] | select(.type == "winpkgs/task") | .properties.triggers[0].type' <<<"$doc")" = logon
@@ -160,9 +173,19 @@ in
         test "$(jq -r '.resources[] | select(.type == "winpkgs/task") | .scope' <<<"$doc")" = machine
 
         # And a run at install, for whoever is signed in already.
-        eventlog() { jq -r --arg f "$1" '.resources[] | select(.id == "Activation steward-eventlog") | .properties[$f] | tostring' <<<"$doc"; }
-        test "$(eventlog command)" = '& "C:\Program Files\steward\steward.exe" provision-eventlog'
+        eventlog() { jq -r --arg f "$1" '.resources[] | select(.id == "Activation steward-eventlog") | .properties[$f] | tostring' <<<"''${2:-$doc}"; }
+        test "$(eventlog command)" = '& "C:\Program Files\steward\steward.exe" provision-eventlog --channel-size 64MiB'
         [[ "$(eventlog revision)" =~ ^[0-9a-f]{64}$ ]]
+
+        # Another size reaches the task and the run at install alike, and the
+        # run happens again for it: the channels are resized at the apply.
+        test "$(task arguments "$kibDoc")" = 'provision-eventlog --channel-size 1028KiB'
+        test "$(eventlog command "$kibDoc")" = '& "C:\Program Files\steward\steward.exe" provision-eventlog --channel-size 1028KiB'
+        test "$(eventlog revision "$kibDoc")" != "$(eventlog revision)"
+        test "$(task arguments "$bytesDoc")" = 'provision-eventlog --channel-size 100000000'
+        # And a size Windows would raise is refused at evaluation, not left
+        # for a task that would fail at every logon.
+        test "$tooSmallEvaluates" = false
         touch $out
       '';
 

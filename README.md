@@ -215,29 +215,42 @@ $xml = @"
   </Settings>
   <Actions Context="Author"><Exec>
     <Command>C:\Program Files\steward\steward.exe</Command>
-    <Arguments>provision-eventlog</Arguments>
+    <Arguments>provision-eventlog --channel-size 64MiB</Arguments>
   </Exec></Actions>
 </Task>
 "@
 $s = New-Object -ComObject Schedule.Service; $s.Connect()
 $s.GetFolder('\').RegisterTask('steward-provision-eventlog', $xml, 6, 'S-1-5-18', $null, 5,
   'D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;0x1200a9;;;AU)')
-& "C:\Program Files\steward\steward.exe" provision-eventlog
+& "C:\Program Files\steward\steward.exe" provision-eventlog --channel-size 64MiB
 ```
 
 PowerShell rather than `schtasks`, which cannot set a task's security
 descriptor at all. That descriptor is the last argument, and it is the point:
 the task runs as SYSTEM, so `0x1200a9` lets ordinary users see it and run it
 while withholding the right to rewrite what it runs. Granting even that much
-is only safe because the command takes no arguments and does the same thing
-every time. The three settings above that are not Windows' defaults each
-matter: `Queue` so that two people signing in at once does not cost one of
-them a channel, and the two battery settings so that a laptop away from its
-charger still gets one.
+is only safe because running it cannot change what it does: the size is
+written into the task, and there is nothing a user who runs it can pass. The
+three settings above that are not Windows' defaults each matter: `Queue` so
+that two people signing in at once does not cost one of them a channel, and
+the two battery settings so that a laptop away from its charger still gets
+one.
 
 The last line runs it once for whoever is signed in already; everyone else
 gets a channel at their next sign-in. Running it again changes nothing unless
 somebody has signed in who had not before.
+
+`--channel-size` is the most each user's channel may hold before its oldest
+records are overwritten: bytes, or a whole number of `KiB`, `MiB` or `GiB`,
+at least `1028KiB` (the least Windows allows, which `1MiB` is not), and
+`64MiB` if it is left out. A record
+costs 1.2 to 1.5 KB however short its line, so 64 MiB is roughly 50,000
+lines for all of a user's units together. The channels are charged to the
+machine, one per account that has ever signed in, so a machine with one busy
+account may want more and one with many accounts on a small disk less. To
+change it, run the block above again with the new size in both places: the
+run resizes every channel there is, without re-creating any, and each logon
+after puts back a size someone set by hand with `wevtutil sl`.
 
 Use the copy you installed, as above. The manifest names that path as the
 channels' resource file, and the Event Log service reads it as itself
