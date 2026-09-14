@@ -129,6 +129,18 @@ pub enum KillMode {
     Process,
 }
 
+/// Where a service's standard output and error go: `StandardOutput=`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Output {
+    /// `%LOCALAPPDATA%\steward\logs\<unit>.log`, through an inherited
+    /// handle: the default, and always safe.
+    #[default]
+    File,
+    /// The user's Event Log channel, `Steward/<SID>`, through the
+    /// `steward-cat` shim in the unit's job.
+    EventLog,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Command {
     /// A Windows command line, as written.
@@ -173,6 +185,9 @@ pub struct Service {
     pub working_directory: Option<String>,
     pub environment: Vec<(String, String)>,
     pub kill_mode: KillMode,
+    /// Where its output goes. Its error stream goes with it: there is no
+    /// `StandardError=`.
+    pub standard_output: Output,
 
     /// A timer's `[Timer]` section; `None` for anything else.
     pub timer: Option<Timer>,
@@ -222,6 +237,7 @@ impl Service {
             working_directory: None,
             environment: Vec::new(),
             kill_mode: KillMode::ControlGroup,
+            standard_output: Output::File,
             timer: (kind == UnitKind::Timer).then(|| Timer::new(name)),
             wanted_by: Vec::new(),
         }
@@ -435,6 +451,21 @@ impl Reader {
                     }
                     other => {
                         return self.error(e.line, format!("KillMode={other} is not supported"))
+                    }
+                }
+            }
+            "StandardOutput" => {
+                s.standard_output = match e.value.as_str() {
+                    "file" | "" => Output::File,
+                    // `journal` is what a unit written for Linux says, and
+                    // the Event Log is what it means here.
+                    "eventlog" | "journal" => Output::EventLog,
+                    other => {
+                        self.warn(
+                            e.line,
+                            format!("StandardOutput={other} is not supported; treated as file"),
+                        );
+                        Output::File
                     }
                 }
             }
@@ -962,6 +993,32 @@ WantedBy=graphical-session.target
                 "line 6: warning: Nice= is not supported in [Service]; ignored",
                 "line 9: warning: section [Timer] is not supported; ignored",
             ]
+        );
+    }
+
+    /// `StandardOutput=eventlog` sends output to the user's channel; unset,
+    /// `file` and anything this cannot do mean the file, the last with a
+    /// warning. `journal` is the same choice under its Linux name.
+    #[test]
+    fn where_the_output_goes() {
+        let with = |value: &str| format!("[Service]\nExecStart=x.exe\nStandardOutput={value}\n");
+        assert_eq!(
+            ok("[Service]\nExecStart=x.exe\n").standard_output,
+            Output::File
+        );
+        assert_eq!(ok(&with("eventlog")).standard_output, Output::EventLog);
+        assert_eq!(ok(&with("journal")).standard_output, Output::EventLog);
+        assert_eq!(ok(&with("file")).standard_output, Output::File);
+        assert_eq!(
+            ok(&(with("eventlog") + "StandardOutput=file\n")).standard_output,
+            Output::File
+        );
+        let parsed = parse_service("t.service", &with("null"));
+        assert!(!parsed.has_errors());
+        assert_eq!(parsed.service.unwrap().standard_output, Output::File);
+        assert_eq!(
+            messages(&with("null")),
+            ["line 3: warning: StandardOutput=null is not supported; treated as file"]
         );
     }
 

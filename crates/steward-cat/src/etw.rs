@@ -6,6 +6,9 @@ use std::io;
 use std::ptr::null;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
+use steward_eventlog::{
+    EVENT_DROPPED, EVENT_OUTPUT, FIELD_BYTES, FIELD_DROPPED, FIELD_STREAM, FIELD_UNIT,
+};
 use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::Diagnostics::Etw::{
@@ -73,19 +76,19 @@ impl Provider {
             keyword: at.keyword,
             traits: tlg::provider_traits(at.name),
             output: tlg::event_metadata(
-                "Output",
+                EVENT_OUTPUT,
                 &[
-                    ("unit", IN_CSTR16, 0),
-                    ("stream", IN_CSTR16, 0),
-                    ("bytes", IN_CSTR16, 0),
+                    (FIELD_UNIT, IN_CSTR16, 0),
+                    (FIELD_STREAM, IN_CSTR16, 0),
+                    (FIELD_BYTES, IN_CSTR16, 0),
                 ],
             ),
             dropped: tlg::event_metadata(
-                "Dropped",
+                EVENT_DROPPED,
                 &[
-                    ("unit", IN_CSTR16, 0),
-                    ("stream", IN_CSTR16, 0),
-                    ("dropped", IN_U64, 0),
+                    (FIELD_UNIT, IN_CSTR16, 0),
+                    (FIELD_STREAM, IN_CSTR16, 0),
+                    (FIELD_DROPPED, IN_U64, 0),
                 ],
             ),
             unit: utf16::cstr(unit),

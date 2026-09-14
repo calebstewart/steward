@@ -13,8 +13,9 @@ mod timer;
 use std::path::{Path, PathBuf};
 
 pub use service::{
-    parse_service, Command, Diagnostic, KillMode, Parsed, Restart, Service, ServiceType, Severity,
-    UnitKind, BUILTIN_TARGETS, DEFAULT_TARGET, GRAPHICAL_TARGET, TIMERS_TARGET, TRAY_TARGET,
+    parse_service, Command, Diagnostic, KillMode, Output, Parsed, Restart, Service, ServiceType,
+    Severity, UnitKind, BUILTIN_TARGETS, DEFAULT_TARGET, GRAPHICAL_TARGET, TIMERS_TARGET,
+    TRAY_TARGET,
 };
 pub use timer::{Timer, Trigger};
 

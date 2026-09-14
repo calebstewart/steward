@@ -111,6 +111,7 @@ covered with examples on the [Targets](@/targets.md#how-units-relate) page.
 | `WorkingDirectory=` | `%USERPROFILE%` | The directory each command starts in. As written: `%` is not expanded here either. |
 | `Environment=` | | `NAME=value` pairs, space-separated, added to the environment or replacing a variable of the same name (compared without regard to case, as Windows does). |
 | `KillMode=` | `control-group` | Which processes are the service's — see [below](#killmode). |
+| `StandardOutput=` | `file` | Where its output and error go: `file`, `%LOCALAPPDATA%\steward\logs\<unit>.log`; or `eventlog` (`journal` means the same), your Event Log channel — see [stewctl logs](@/stewctl.md#a-unit-in-the-event-log). Anything else is a warning, treated as `file`. There is no `StandardError=`. |
 
 steward's timeouts are shorter than systemd's 90 s because sign-out does not
 wait a minute and a half. Any time can be `infinity`.

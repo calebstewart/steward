@@ -10,3 +10,14 @@ publish.workspace = true
 steward-unit.workspace = true
 steward-ipc.workspace = true
 clap = { version = "4", features = ["derive"] }
+steward-eventlog.workspace = true
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_EventLog",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+]

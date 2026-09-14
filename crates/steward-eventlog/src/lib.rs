@@ -73,6 +73,38 @@ pub const CHANNEL_KEYWORD: u64 = 0;
 /// back.
 pub const CHANNEL_MAX_SIZE: u64 = 64 << 20;
 
+/// The events in a channel, as the shim writes them and `stewctl logs`
+/// reads them back. Named here so that the writer and the reader cannot
+/// drift apart: the reader filters on [`FIELD_UNIT`] with an XPath and
+/// tells the streams apart by [`FIELD_STREAM`]'s value.
+///
+/// [`EVENT_OUTPUT`] is one line of a unit's output, without its line end:
+/// [`FIELD_UNIT`], [`FIELD_STREAM`] and [`FIELD_BYTES`], all nul-terminated
+/// UTF-16 strings. [`FIELD_STREAM`] is [`STREAM_STDOUT`] or [`STREAM_STDERR`]
+/// from the shim, and [`STREAM_STEWARD`] for a line the manager writes
+/// about the unit -- started, exited, restarting -- which `stewctl logs`
+/// shows as `-- <time> steward: <line>`, as it shows the manager's lines in
+/// a file. [`EVENT_DROPPED`] says the shim lost output while nobody was
+/// listening: [`FIELD_UNIT`], [`FIELD_STREAM`] and [`FIELD_DROPPED`], the
+/// bytes of line text lost, as a `u64`.
+pub const EVENT_OUTPUT: &str = "Output";
+/// See [`EVENT_OUTPUT`].
+pub const EVENT_DROPPED: &str = "Dropped";
+/// See [`EVENT_OUTPUT`].
+pub const FIELD_UNIT: &str = "unit";
+/// See [`EVENT_OUTPUT`].
+pub const FIELD_STREAM: &str = "stream";
+/// See [`EVENT_OUTPUT`].
+pub const FIELD_BYTES: &str = "bytes";
+/// See [`EVENT_OUTPUT`].
+pub const FIELD_DROPPED: &str = "dropped";
+/// See [`EVENT_OUTPUT`].
+pub const STREAM_STDOUT: &str = "stdout";
+/// See [`EVENT_OUTPUT`].
+pub const STREAM_STDERR: &str = "stderr";
+/// See [`EVENT_OUTPUT`].
+pub const STREAM_STEWARD: &str = "steward";
+
 /// The provider that owns `sid`'s channel: `Steward-<SID>`.
 ///
 /// A name rather than only a GUID because Windows' own tools take a provider
