@@ -1,15 +1,19 @@
 //! The Windows half of supervision: jobs, processes, the completion port the
 //! manager waits on, environments, asking programs to exit, Explorer's
-//! readiness, and the local clock timers keep. Each module is a thin, safe
-//! wrapper over the Win32 calls it names.
+//! readiness, the local clock timers keep, and -- for the Event Log
+//! provisioning rather than for supervision -- who is signed in and the Task
+//! Scheduler. Each module is a thin, safe wrapper over the Win32 calls it
+//! names.
 
 pub mod clock;
 pub mod env;
 pub mod job;
 pub mod port;
 pub mod process;
+pub mod session;
 pub mod shell;
 pub mod signal;
+pub mod task;
 
 use std::ffi::OsStr;
 use std::io;

@@ -82,5 +82,27 @@ in
       # elevated. Instances copy it at sign-in.
       securityDescriptor = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;IU)(A;;CCLCSWLORC;;;SU)";
     };
+
+    # The other half of the elevated install: the Scheduled Task that gives
+    # each user an Event Log channel of their own, `Steward/<their SID>`, for
+    # their units' output. It runs as SYSTEM at the logon of any user,
+    # because creating a channel is administrative and the manager is not,
+    # and because this step cannot know which accounts will ever sign in.
+    #
+    # An activation rather than a resource: winpkgs can enable and disable a
+    # scheduled task but does not create one, and the task carries a security
+    # descriptor (users may run it, not change it) that only the Task
+    # Scheduler's own API can set. steward registers it itself, from the path
+    # it is installed at, so there is one definition of the task rather than
+    # one here and one in the README.
+    #
+    # Re-run when the binaries change, which is the only thing that can
+    # change what the task should say. Idempotent either way: it replaces the
+    # task with the same definition and imports nothing it has imported
+    # before.
+    winpkgs.activation.steward-eventlog = {
+      command = ''& "${exe}" provision-eventlog --install'';
+      triggers = [ cfg.package ];
+    };
   };
 }

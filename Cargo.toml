@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/steward-unit",
+    "crates/steward-eventlog",
     "crates/steward-supervisor",
     "crates/steward-ipc",
     "crates/steward",
@@ -16,5 +17,6 @@ publish = false
 
 [workspace.dependencies]
 steward-unit = { path = "crates/steward-unit" }
+steward-eventlog = { path = "crates/steward-eventlog" }
 steward-supervisor = { path = "crates/steward-supervisor" }
 steward-ipc = { path = "crates/steward-ipc" }

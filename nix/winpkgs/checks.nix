@@ -140,6 +140,14 @@ in
 
         # stewctl is on the machine PATH.
         test "$(jq -r '.resources[] | select(.type == "winpkgs/path") | .properties.dir' <<<"$doc")" = 'C:\Program Files\steward'
+
+        # The elevated install also registers the Event Log provisioning task
+        # (#24), by running the steward it just installed rather than by
+        # spelling the task out here.
+        eventlog() { jq -r --arg f "$1" '.resources[] | select(.id == "Activation steward-eventlog") | .properties[$f] | tostring' <<<"$doc"; }
+        test "$(eventlog command)" = '& "C:\Program Files\steward\steward.exe" provision-eventlog --install'
+        test "$(jq -r '.resources[] | select(.id == "Activation steward-eventlog") | .scope' <<<"$doc")" = machine
+        [[ "$(eventlog revision)" =~ ^[0-9a-f]{64}$ ]]
         touch $out
       '';
 
