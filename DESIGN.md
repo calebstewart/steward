@@ -476,7 +476,7 @@ What it costs, and what to keep an eye on:
   the duplicate. What is missing is a check that the number still names that
   pipe rather than whatever the shim opened later, which `GetFileType` does
   not give; the manager would also have to save the numbers with the shim's
-  PID. Not done.
+  PID. Not done: #48.
 - **Loss past about 100,000 lines a second is silent**, as #25 found: ETW
   drops, `EventWrite` still succeeds, and no line can mark the gap the way
   the file's set-aside line does.
