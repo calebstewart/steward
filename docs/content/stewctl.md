@@ -252,7 +252,12 @@ that does not say, it reads the channel if you have one and the file if you
 do not, so it needs no manager for either. It reads the channel with
 `EvtQuery` and `EvtRender` only. steward's provider has no message file, so
 `wevtutil gp` and `Get-WinEvent` complain about that on every call; `logs`
-never goes through the part that complains. What a channel holds is bounded
+never goes through the part that complains. Neither does Event Viewer: the
+message is in the record, so its General tab shows the line and its Details
+tab the fields. `Get-WinEvent`'s own `Message` property is the one place the
+line does not appear — it reads "Cannot retrieve event message text." — so
+read the event's `Properties` there, or use `wevtutil qe /f:text`, which
+prints the line as the description. What a channel holds is bounded
 by its size, 64 MiB unless the install chose otherwise
 (`services.steward.eventlog.channelSize`, or `--channel-size` on the task),
 which is roughly 50,000 short lines for all of your units together, or

@@ -304,7 +304,12 @@ Expect one complaint even when it is right. steward carries no resource
 section, having no compiled event templates to put in one, so `wevtutil gp`
 says so and `Get-WinEvent` repeats it as a non-terminating error while
 returning the events and their fields regardless. Nothing is lost by it;
-`stewctl logs` will not go through either of those.
+`stewctl logs` will not go through either of those, and neither does Event
+Viewer, whose General tab shows the line because the message is carried in
+the record rather than looked up in the provider. The one thing the complaint
+costs you is `Get-WinEvent`'s `Message` property, which reads "Cannot
+retrieve event message text."; the line itself is in the event's
+`Properties`, and `wevtutil qe /f:text` prints it as the description.
 
 Channels only accumulate. Signing out keeps yours, which is the point -- the
 log outlives the session -- but so does deleting the account: its channel and

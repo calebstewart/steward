@@ -89,10 +89,25 @@ pub fn channel_access(sid: &str) -> String {
 /// comes from opening the publisher's metadata to format a message, which
 /// `EvtQuery` and `EvtRender` never do: rendering as XML or as values
 /// returns the full `EventData`, and the right `RenderingInfo` besides. Only
-/// `EvtFormatMessage` and `EvtOpenPublisherMetadata` fail, and nothing here
-/// needs either. Still unknown, and worth a look before this is called
-/// settled: how Event Viewer's own General tab shows an event whose
-/// publisher has no metadata.
+/// `EvtOpenPublisherMetadata` fails, and nothing here needs it.
+///
+/// Event Viewer's General tab is fine, checked against the live channel on
+/// 2026-09-15. The events are self-describing, so the message is in the
+/// record rather than in publisher metadata: `EvtRender(EvtRenderEventXml)`
+/// returns a `RenderingInfo Culture='zxx'` whose `Message` is `Output`
+/// followed by `unit`, `stream` and `bytes`, and `EvtFormatMessage` with
+/// `EvtFormatMessageEvent` returns that same text given a null publisher
+/// handle -- which is the call the General tab makes, and which is why
+/// `wevtutil qe /f:text` prints the line as the event's description while
+/// `wevtutil gp` on the same provider fails. What has no message is the
+/// publisher-metadata path itself: `Get-WinEvent` leaves `.Message` at its
+/// own "Cannot retrieve event message text." (a literal in
+/// `Microsoft.PowerShell.Commands.Diagnostics.dll`, not anything the Event
+/// Log said), and `wevtutil qe /f:RenderedXml` appends a second
+/// `RenderingInfo Culture='en-US'` reading "The operation completed
+/// successfully." Both still return every field. So a compiled message
+/// resource would buy formatting for those two consumers and no data, which
+/// is not worth an `mc.exe` step in a cross-build.
 ///
 /// Sorted and deduplicated, so that the same set of users gives the same
 /// bytes however they were enumerated: that is what lets the caller decide
