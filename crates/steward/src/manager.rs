@@ -80,6 +80,27 @@ const TRAY_GRACE: Duration = Duration::from_secs(10);
 /// during the run. A unit that logs steadily and never starts again would
 /// otherwise fill the disk.
 const LOG_CHECK: Duration = Duration::from_secs(10);
+/// How many replacement `steward-cat`s one run may be given inside
+/// [`SHIM_RESTART_WINDOW`] before the manager stops replacing it, closes its
+/// read ends and lets the unit's writes fail.
+///
+/// The two ways a shim dies want opposite things. One-off -- something ended
+/// it, a stray `taskkill`, a process killed for the memory it held -- wants
+/// replacing every time, however long the unit runs; a shim that cannot run
+/// at all -- a `steward-cat.exe` a policy will not let start, a machine out
+/// of desktop heap -- wants giving up on quickly, because until the manager
+/// does, the unit blocks on a pipe with nothing draining it. A window tells
+/// them apart: a shim killed once an hour never reaches five inside a minute,
+/// and one that dies as soon as it starts reaches it in the time five
+/// replacements take -- each of eleven measured on gaming-windows started
+/// between 0.8 ms and 26 ms after the exit it answered, so a tenth of a
+/// second at worst.
+const SHIM_RESTARTS: u32 = 5;
+/// The window [`SHIM_RESTARTS`] is counted in, from the first replacement of
+/// the run or of the last window: a minute, long enough that a shim dying
+/// again half a minute later still counts as the same trouble, short enough
+/// that a run of weeks is not spending its allowance on last week's.
+const SHIM_RESTART_WINDOW: Duration = Duration::from_secs(60);
 /// The exit code steward terminates processes with.
 const KILLED: u32 = 0x5354_5744; // "STWD"
 /// NTSTATUS for "unsuccessful": a crash whose exit code could not be read.
@@ -126,14 +147,26 @@ enum Output {
     /// the shim with it and lose the unit's last lines, the ones worth
     /// reading; and the Ctrl+C that asks the job's processes to exit would
     /// end the shim first.
+    ///
+    /// The manager keeps a copy of each read end too, which it never reads:
+    /// it is there so that a shim that dies can be replaced on the same
+    /// pipes ([`Manager::shim_exited`]), and it is what makes the unit's
+    /// writes wait rather than fail in the moment between the two.
     EventLog {
         stdout: OwnedHandle,
         stderr: OwnedHandle,
+        /// The read ends, kept only to hand to a replacement shim. Closing
+        /// them is how the manager gives up on one.
+        reads: (OwnedHandle, OwnedHandle),
         shim: Tracked,
+        /// Replacements started in the window that began at `window`.
+        replacements: u32,
+        window: Instant,
     },
     /// A unit whose output was to go to the channel, but whose `steward-cat`
-    /// could not be started, or exited: its output goes to its file for this
-    /// run, and this is why.
+    /// could not be started, or died more often than it was worth replacing
+    /// ([`SHIM_RESTARTS`]): its output goes to its file for this run, and
+    /// this is why.
     Fallback(String),
 }
 
@@ -1628,12 +1661,38 @@ impl Manager {
         }
     }
 
-    /// Two pipes and a `steward-cat` reading them: in no job (see
+    /// Two pipes and a `steward-cat` reading them.
+    fn start_shim(&mut self, name: &str) -> std::io::Result<Output> {
+        let (out_read, out_write) = process::pipe()?;
+        let (err_read, err_write) = process::pipe()?;
+        let shim = self.spawn_shim(name, &out_read, &err_read)?;
+        Ok(Output::EventLog {
+            stdout: out_write,
+            stderr: err_write,
+            reads: (out_read, err_read),
+            shim,
+            replacements: 0,
+            window: Instant::now(),
+        })
+    }
+
+    /// A `steward-cat` reading the two read ends: in no job (see
     /// [`Output::EventLog`]), with no console, its own few words going to
     /// `steward.log`. It is given the read ends by number, and only those:
     /// the write ends are for the unit's processes, and a copy of one in
     /// the shim would keep it from ever seeing the end of the output.
-    fn start_shim(&mut self, name: &str) -> std::io::Result<Output> {
+    ///
+    /// The manager keeps its own copies -- the handles here are borrowed,
+    /// not given away -- so that it can start another on the same pipes if
+    /// this one dies. A read end open in the manager is not a reader: the
+    /// pipe ends for the shim when the last write end closes, whoever holds
+    /// the read side, so nothing here keeps a shim alive past its unit.
+    fn spawn_shim(
+        &mut self,
+        name: &str,
+        out_read: &OwnedHandle,
+        err_read: &OwnedHandle,
+    ) -> std::io::Result<Tracked> {
         let exe = std::env::current_exe()?.with_file_name("steward-cat.exe");
         if !exe.is_file() {
             return Err(std::io::Error::new(
@@ -1641,8 +1700,6 @@ impl Manager {
                 format!("{} does not exist", exe.display()),
             ));
         }
-        let (out_read, out_write) = process::pipe()?;
-        let (err_read, err_write) = process::pipe()?;
         let stdin = self
             .stdin
             .as_ref()
@@ -1664,36 +1721,48 @@ impl Manager {
                 stdin,
                 stdout: &own_log,
                 stderr: &own_log,
-                also: &[&out_read, &err_read],
+                also: &[out_read, err_read],
             },
             false,
         )?;
-        // The shim has its copies of the read ends; the manager's close
-        // here, so that a shim that dies leaves the unit's writes failing
-        // rather than blocking on a pipe nobody drains.
-        drop((out_read, err_read));
-        let shim = match self.track(child) {
-            Ok(tracked) => tracked,
+        match self.track(child) {
+            Ok(tracked) => Ok(tracked),
             Err((child, e)) => {
                 let _ = child.terminate(KILLED);
-                return Err(e);
+                Err(e)
             }
-        };
-        Ok(Output::EventLog {
-            stdout: out_write,
-            stderr: err_write,
-            shim,
-        })
+        }
     }
 
     /// The unit's `steward-cat` exited while the manager still held a write
     /// end of its pipes, so not for the end of the output: it crashed, or
-    /// something ended it. The unit's running processes now write into a
-    /// pipe nobody reads, which is the one way an eventlog unit loses its
-    /// output, and there is nothing to be done for them; what the manager
-    /// starts for the unit from here on writes to the file instead.
+    /// something ended it. Nothing reads the unit's pipes now, and its
+    /// processes cannot be told to write anywhere else -- they hold the
+    /// handles they were started with -- so the manager starts another
+    /// `steward-cat` on the same two pipes. What the dead shim had read and
+    /// not yet written is lost, and what it was holding for a channel nobody
+    /// listened to yet is lost with its memory; nothing else is, and the
+    /// unit's writes never fail.
+    ///
+    /// Until the replacement reads, the pipes are filling: a unit's write
+    /// waits once 64 KiB is in one ([`process::pipe`]), rather than failing
+    /// as it did when the manager closed its read ends here. That is the
+    /// trade, and why the manager gives up after [`SHIM_RESTARTS`] inside
+    /// [`SHIM_RESTART_WINDOW`]: past that the shim is not coming back, and a
+    /// unit that fails its writes is better off than one stopped forever on
+    /// a pipe. Giving up closes the read ends and is what used to happen at
+    /// the first death -- the writes fail, and what the manager starts for
+    /// the unit next writes to its file.
     fn shim_exited(&mut self, slot: usize) {
-        let Some(Output::EventLog { shim, .. }) = self.units[slot].output.take() else {
+        let Some(Output::EventLog {
+            stdout,
+            stderr,
+            reads,
+            shim,
+            replacements,
+            window,
+        }) = self.units[slot].output.take()
+        else {
             return;
         };
         let code = shim.child.exit_code().unwrap_or(STATUS_UNSUCCESSFUL);
@@ -1703,6 +1772,54 @@ impl Manager {
         );
         drop(shim);
         let name = self.units[slot].name.clone();
+        // A window that has run out begins again with this death.
+        let now = Instant::now();
+        let (replacements, window) = if now.duration_since(window) >= SHIM_RESTART_WINDOW {
+            (0, now)
+        } else {
+            (replacements, window)
+        };
+        let refused = if replacements >= SHIM_RESTARTS {
+            Some(format!(
+                "{SHIM_RESTARTS} replacements in the last {} s were not enough",
+                SHIM_RESTART_WINDOW.as_secs()
+            ))
+        } else {
+            match self.spawn_shim(&name, &reads.0, &reads.1) {
+                Ok(shim) => {
+                    let pid = shim.child.pid;
+                    info!("{name}: {why}; steward-cat {pid} reads its pipes from here on");
+                    self.units[slot].output = Some(Output::EventLog {
+                        stdout,
+                        stderr,
+                        reads,
+                        shim,
+                        replacements: replacements + 1,
+                        window,
+                    });
+                    // Between the dead shim's last event and this one's
+                    // first, which is where the gap is. Neither of them can
+                    // say how big it was -- the bytes went with the dead
+                    // shim -- so no `Dropped` event claims a number, and the
+                    // mark stands in its place, at the same warning level.
+                    self.mark_at(
+                        slot,
+                        Level::Warning,
+                        &format!(
+                            "{why}: steward-cat {pid} took over its pipes, losing what the \
+                             first had read and not yet written"
+                        ),
+                    );
+                    return;
+                }
+                Err(e) => Some(format!("another cannot be started ({e})")),
+            }
+        };
+        // Closing the read ends is what makes the unit's next write fail
+        // rather than wait forever on a pipe nothing will ever drain.
+        drop(reads);
+        drop((stdout, stderr));
+        let why = format!("{why}, and {}", refused.expect("set on every path here"));
         error!("{name}: {why}; its output from here on goes to its log file");
         self.units[slot].output = Some(Output::Fallback(why.clone()));
         self.dirty = true;

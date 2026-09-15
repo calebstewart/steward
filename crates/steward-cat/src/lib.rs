@@ -1,11 +1,15 @@
 //! steward-cat: reads a unit's stdout and stderr and writes them to the
 //! user's Event Log channel, in the spirit of `systemd-cat`.
 //!
-//! The manager starts one per unit whose output goes to the Event Log, in the
-//! unit's job, with the read ends of the unit's two pipes. It outlives a
-//! manager crash or hand-over and dies with the unit, and it is the one thing
-//! whose own crash loses a unit's output, so it is small: two threads each
-//! reading one pipe, one event per line, and nothing allocated once they run.
+//! The manager starts one per unit whose output goes to the Event Log, with
+//! the read ends of the unit's two pipes. It is not in the unit's job: the
+//! pipes are what tie it to the unit, so it outlives a manager crash or a
+//! hand-over and dies with the unit. A manager that made those pipes starts
+//! another on them if this one dies, which costs the unit the line it was in
+//! the middle of and whatever it was still holding for a channel nobody
+//! listened to yet; a manager that adopted the unit from another has no read
+//! end to hand over and cannot. So this stays small: two threads each reading
+//! one pipe, one event per line, and nothing allocated once they run.
 //!
 //! The pieces that are not Windows -- the escape sequences taken out, where a
 //! line ends, what is held while nobody listens, the text an event carries,
