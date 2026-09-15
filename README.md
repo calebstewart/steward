@@ -230,7 +230,7 @@ $xml = @"
   </Settings>
   <Actions Context="Author"><Exec>
     <Command>C:\Program Files\steward\steward.exe</Command>
-    <Arguments>provision-eventlog --channel-size 64MiB --account "Your Name"</Arguments>
+    <Arguments>provision-eventlog --channel-size 128MiB --account "Your Name"</Arguments>
   </Exec></Actions>
 </Task>
 "@
@@ -303,14 +303,25 @@ out of each line before it goes into the channel.
 `--channel-size` is the most each user's channel may hold before its oldest
 records are overwritten: bytes, or a whole number of `KiB`, `MiB` or `GiB`,
 at least `1028KiB` (the least Windows allows, which `1MiB` is not), and
-`64MiB` if it is left out. A record
-costs 1.2 to 1.5 KB however short its line, so 64 MiB is roughly 50,000
-lines for all of a user's units together. The channels are charged to the
-machine, one per account that has ever signed in, so a machine with one busy
-account may want more and one with many accounts on a small disk less. To
-change it, run the block above again with the new size in both places: the
-run resizes every channel there is, without re-creating any, and each logon
-after puts back a size someone set by hand with `wevtutil sl`.
+`128MiB` if it is left out. A record costs 1.2 to 1.5 KB however short its
+line, so 128 MiB is roughly 100,000 short lines for all of a user's units
+together, or 56,000 of a daemon like komorebi, whose lines are longer. On
+the machine it was measured on that is about a week, which is what the log
+files held; 64 MiB, the default while the channel was opt-in per unit, was
+three to four days.
+
+The channels are charged to the machine, one per account that has ever
+signed in, so a machine with many accounts on a small disk may want less.
+The size is a ceiling and not a reservation, though: an `.evtx` grows as it
+is written and stops there, the way Windows' own channels do, so an account
+that signs in and runs little occupies about 1 MiB of it. A machine with a
+daemon chattier than komorebi may want more, or may want that one unit on
+`StandardOutput=file`; a user's units share the channel, so the chatty one
+ages out the rest, and the file gives it a budget of its own again.
+
+To change the size, run the block above again with the new size in both
+places: the run resizes every channel there is, without re-creating any, and
+each logon after puts back a size someone set by hand with `wevtutil sl`.
 
 A smaller size takes nothing away from what a channel already holds.
 `wevtutil gl` reports the new size at once, but a channel whose file has

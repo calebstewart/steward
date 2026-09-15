@@ -38,7 +38,7 @@ let
   channelSize = types.addCheck types.ints.positive (n: n >= 1028 * 1024) // {
     description = "size in bytes, at least 1028 KiB";
   };
-  # The size as an administrator reading the task would write it: 64MiB,
+  # The size as an administrator reading the task would write it: 128MiB,
   # 1028KiB, or bytes when it is neither.
   showSize =
     n:
@@ -93,18 +93,29 @@ in
 
     eventlog.channelSize = mkOption {
       type = channelSize;
-      default = 64 * mib;
-      defaultText = lib.literalExpression "64 * 1024 * 1024";
+      default = 128 * mib;
+      defaultText = lib.literalExpression "128 * 1024 * 1024";
       example = lib.literalExpression "256 * 1024 * 1024";
       description = ''
         The most each user's Event Log channel, `Steward/<SID>`, may hold
         before its oldest records are overwritten, in bytes.
 
         A budget in lines more than in bytes: a record costs 1.2 to 1.5 KB
-        of `.evtx` however short its line, so 64 MiB is roughly 50,000 lines
-        for all of a user's units together. The channels live under
+        of `.evtx` however short its line, so 128 MiB is roughly 100,000
+        short lines for all of a user's units together, or 56,000 of a
+        daemon like komorebi, whose lines are longer. Measured against a
+        real machine's units that is about a week, which is what the log
+        files held. The channels live under
         `%SystemRoot%\System32\Winevt\Logs`, charged to the machine and not
-        to any profile, one per account that has ever signed in.
+        to any profile, one per account that has ever signed in; the size is
+        a ceiling and not a reservation, so a quiet account's channel
+        occupies about 1 MiB whatever this says.
+
+        A unit far chattier than the rest ages out their history, the
+        channel being shared by all of a user's units. Raising this buys
+        every unit more; `StandardOutput=file` on the chatty one instead
+        gives it its own 8 MiB and one generation, and leaves the channel to
+        the units whose history you want.
 
         At least 1028 KiB, the least Windows allows a channel; `1 MiB` is
         less. Changing it resizes every existing channel at the next apply,
