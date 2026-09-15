@@ -171,6 +171,13 @@ hand their services to the new one. A home apply that changes the units runs
 `stewctl switch`, so the running manager restarts what changed, starts what
 is new and stops what is gone; a unit you stopped stays stopped.
 
+The system apply also declares the Event Log provisioning task described
+below, and creates a channel then and there for the account each of
+`winpkgs.homes` is for, so that only an account the configuration did not
+name has to wait for its first sign-in to get one.
+`services.steward.eventlog.accounts` is that list, to add to for an account
+winpkgs manages no home for.
+
 ## Installing it as a per-user service by hand
 
 Once, from an administrator prompt:
@@ -223,7 +230,7 @@ $xml = @"
   </Settings>
   <Actions Context="Author"><Exec>
     <Command>C:\Program Files\steward\steward.exe</Command>
-    <Arguments>provision-eventlog --channel-size 64MiB</Arguments>
+    <Arguments>provision-eventlog --channel-size 64MiB --account "Your Name"</Arguments>
   </Exec></Actions>
 </Task>
 "@
@@ -237,20 +244,42 @@ PowerShell rather than `schtasks`, which cannot set a task's security
 descriptor at all. That descriptor is the last argument, and it is the point:
 the task runs as SYSTEM, so `0x1200a9` lets ordinary users see it and run it
 while withholding the right to rewrite what it runs. Granting even that much
-is only safe because running it cannot change what it does: the size is
-written into the task, and there is nothing a user who runs it can pass. The
+is only safe because running it cannot change what it does: the size and the
+account names are written into the task, and there is nothing a user who runs
+it can pass -- `--uninstall`, which would remove every channel on the machine,
+is refused unless it is the whole command line, so a name cannot smuggle it
+in. The
 three settings above that are not Windows' defaults each matter: `Queue` so
 that two people signing in at once does not cost one of them a channel, and
 the two battery settings so that a laptop away from its charger still gets
 one.
 
-The last line runs it once for whoever is signed in already; everyone else
-gets a channel at their next sign-in. It starts the task rather than running
-`steward.exe provision-eventlog` from this prompt, because finding who is
-signed in takes SYSTEM's privilege: run by an administrator, the program
-passes over every session and creates nothing. Running it again changes
-nothing unless somebody has signed in who had not before. Each run leaves an
-account of itself in `%ProgramData%\steward\provision-eventlog.log`.
+The last line runs it once for whoever is signed in already, and for whoever
+`--account` named; everyone else gets a channel at their next sign-in. It
+starts the task rather than running `steward.exe provision-eventlog` from
+this prompt, because finding who is signed in takes SYSTEM's privilege: run
+by an administrator, the program passes over every session and makes only the
+channels of the accounts it was told about. Running it again changes nothing
+unless somebody has signed in, or been named, who had not before. Each run
+leaves an account of itself in
+`%ProgramData%\steward\provision-eventlog.log`.
+
+`--account` names an account to make a channel for whether it is signed in or
+not, and may be given once for each account you know the machine is for. It
+is worth giving, because without it a channel is made the first time its
+account signs in, and that is the one moment a unit's output waits on the
+task: the units start before the channel exists, and their `steward-cat`
+shims hold their output until it appears, about 0.2 s later. Naming the
+accounts you know of leaves that only to the ones you did not. A name is
+whatever Windows calls the account -- `guest`, `DOMAIN\guest`, or a display
+name with spaces in it, in quotes -- and it is a name rather than a SID
+because a local account has no SID until somebody creates it, while its name
+is known as soon as you have decided on it. A name that does not resolve when
+the task runs is named in the report and passed over: it costs no other
+account its channel, and that account gets one at its first sign-in as it
+would have anyway. So does a name that is not a user's -- Windows calls
+`SYSTEM` and `Everyone` groups rather than users, and a channel for one of
+those is a channel nobody could write to.
 
 A channel the Event Log cannot enable is named there and passed over, the
 others are provisioned regardless, and the run exits 1, so the task's last

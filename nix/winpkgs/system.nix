@@ -14,11 +14,20 @@
   config,
   lib,
   pkgs,
+  winpkgsSrc,
   ...
 }:
 let
   inherit (lib) mkOption types;
   cfg = config.services.steward;
+  # The same reading of a home configuration's name that
+  # `modules/system/installer.nix` makes, from the same function: the account
+  # winpkgs would create for that home is the account whose channel this
+  # wants. Imported the way that module imports it, rather than guessing at
+  # the `@`, so a change to what winpkgs considers an account name reaches
+  # here too.
+  installer = import "${winpkgsSrc}/lib/installer.nix" { inherit lib winpkgsSrc; };
+  isHome = h: (h.config.winpkgs.kind or null) == "home";
   # The SCM runs the command as written; a Windows path, backslashes and all.
   exe = "${cfg.directory}\\steward.exe";
 
@@ -39,9 +48,22 @@ let
       "${toString (n / 1024)}KiB"
     else
       toString n;
+  # An account as the task's action names it. Quoted, because a Windows
+  # account name may hold spaces ("Caleb Stewart") and the action is one
+  # string that `CommandLineToArgvW` cuts up again. A `"` in a name would cut
+  # it somewhere else, so it is refused in an assertion below rather than
+  # escaped: Windows does not allow one in an account name either.
+  account = name: ''--account "${name}"'';
   # The one command line, shared by the task and the run at install so the
   # two cannot disagree.
-  provisionArgs = "provision-eventlog --channel-size ${showSize cfg.eventlog.channelSize}";
+  provisionArgs = lib.concatStringsSep " " (
+    [
+      "provision-eventlog"
+      "--channel-size"
+      (showSize cfg.eventlog.channelSize)
+    ]
+    ++ map account cfg.eventlog.accounts
+  );
 in
 {
   options.services.steward = {
@@ -97,9 +119,57 @@ in
         from then on the channel grows no further than the new size.
       '';
     };
+
+    eventlog.accounts = mkOption {
+      type = types.listOf types.str;
+      default = map (h: (installer.splitHomeName h.config.winpkgs.name).user) (
+        lib.filter isHome config.winpkgs.homes
+      );
+      defaultText = lib.literalMD "the account each of `winpkgs.homes` is for";
+      example = lib.literalExpression ''[ "Caleb Stewart" "guest" ]'';
+      description = ''
+        Accounts whose channel is created at the install, rather than at that
+        account's first sign-in. The default is the accounts this machine's
+        homes are for, which the configuration already knows; add to it for
+        an account winpkgs manages no home for.
+
+        A channel is otherwise made the first time its account signs in,
+        because a run of the task can only see the sessions signed in. The
+        units start before the channel exists and their shims hold their
+        output until it does -- about 0.2 s end to end, measured -- so this
+        buys back a small race for every account the install could foresee,
+        and leaves it only to the accounts it could not.
+
+        Names as Windows names them: a local account (`guest`), a domain
+        account (`DOMAIN\guest`), or a display name with spaces in it. A name
+        that does not resolve when the task runs -- a local account the image
+        has not created yet -- is passed over and named in
+        `%ProgramData%\steward\provision-eventlog.log`, costs no other
+        account its channel, and gets one at its first sign-in as it would
+        have anyway. So does a name that resolves to something that is not a
+        user: `LookupAccountName` calls `SYSTEM` and `Everyone` groups rather
+        than users, and a channel for one of those is a channel nobody could
+        write to.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
+    # An account name goes into the task's action inside quotes, and the
+    # action is the one string a caller cannot change. A `"` in a name would
+    # end those quotes and make the rest of the name arguments of its own, so
+    # it is refused here. Nothing is lost: Windows does not allow a `"` in an
+    # account name.
+    assertions = [
+      {
+        assertion = !lib.any (lib.hasInfix "\"") cfg.eventlog.accounts;
+        message = ''
+          services.steward.eventlog.accounts: an account name may not contain a
+          double quote; Windows does not allow one either.
+        '';
+      }
+    ];
+
     # The directory as a whole: an upgrade replaces it, and anything else in
     # it goes.
     windows.files.${cfg.directory}.source = "${cfg.package}/bin";
@@ -140,6 +210,14 @@ in
     # machine, so the channels are made at each logon by something running as
     # SYSTEM.
     #
+    # It does know some of them, though: the homes it declares. Those are
+    # named in the action as `--account`, so their channels are made at the
+    # install and only an account nobody foresaw waits for its first sign-in
+    # (`eventlog.accounts`). Names and not SIDs, because a local account's
+    # SID does not exist until the account does, and an evaluation has no way
+    # to know it; the task resolves each name when it runs, which needs no
+    # privilege, and passes over one that does not resolve yet.
+    #
     # Declared rather than registered by steward itself, for the reason
     # winpkgs declares the service above rather than shelling out to `sc`: a
     # task winpkgs owns is deleted again when it leaves the configuration,
@@ -165,20 +243,25 @@ in
       # reads as "may see it and may run it". Deliberately no write: the task
       # runs as SYSTEM, so a user who could rewrite its action could run
       # anything as SYSTEM. Safe to grant because running it cannot change
-      # what it does: the size is a literal in the action, which has no
-      # `$(Arg0)` for a caller's parameters to land in -- and needed, because
+      # what it does: the size and the accounts are literals in the action,
+      # which has no `$(Arg0)` for a caller's parameters to land in -- and
+      # `--uninstall` is refused unless it is the whole command line, so no
+      # account name can turn a run into one that removes every channel on
+      # the machine. Needed, too, because
       # the manager will want to run it on demand, and because a task an
       # unelevated plan cannot read counts as a change at every apply.
       securityDescriptor = "D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;0x1200a9;;;AU)";
     };
 
     # The task covers every logon after this one. Whoever is signed in right
-    # now would otherwise wait until their next, so the apply runs it once --
-    # and again when the size changes, which is why the arguments are among
-    # the triggers. The apply starts the task rather than running the
-    # program itself: finding who is signed in takes SYSTEM's privilege, and
-    # an elevated administrator run passes over every session and creates
-    # nothing (seen, 2026-09-14, #28). Started, not waited for; its report
+    # now would otherwise wait until their next, and an account this
+    # configuration names would wait for its first, so the apply runs it once
+    # -- and again whenever the size or the accounts change, which is why the
+    # whole command line is among the triggers. The apply starts the task
+    # rather than running the program itself: finding who is signed in takes
+    # SYSTEM's privilege, and an elevated administrator's run passes over
+    # every session (seen, 2026-09-14, #28), so it would make the named
+    # accounts' channels and nobody else's. Started, not waited for; its report
     # is %ProgramData%\steward\provision-eventlog.log. Nothing to prune
     # afterwards: unlike registering the task, running it only creates
     # channels, and those outlive any configuration.

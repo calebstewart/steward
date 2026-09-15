@@ -265,7 +265,8 @@ the accounts that will sign in to a machine are not known to the one elevated
 step that registers the template, so the install declares a Scheduled Task as
 well: `steward provision-eventlog`, run as SYSTEM at the logon of any user,
 which regenerates a channels-only manifest from the sessions signed in and
-imports it. Its one argument, the size of every channel, is a literal in the
+from the accounts the install named, and imports it. Its arguments -- the
+size of every channel, and those account names -- are literals in the
 task's action rather than anything a caller supplies, and it is idempotent --
 it sets a size or a descriptor that has drifted without re-importing anything
 -- which is what lets it carry a descriptor that users may run but not
@@ -276,7 +277,8 @@ leaves a configuration, where a program that registered its own would leave
 one running as SYSTEM behind. The install starts the task once rather than
 running the program: finding who is signed in takes SYSTEM's privilege, and
 the program run by an elevated administrator passes over every session and
-creates nothing. `steward-eventlog` holds the names, the provider GUIDs and
+makes only the channels of the accounts it was told about.
+`steward-eventlog` holds the names, the provider GUIDs and
 the manifest, because the task and the per-unit shim that writes the events
 have to agree on all three without talking to each other -- and the events'
 own names and fields, because `stewctl logs` reads them back.
@@ -456,9 +458,52 @@ asked for. A sign-out mid-run is passed over by the task by design: a session
 it cannot resolve is named in its report, and a task running as SYSTEM is
 not tied to the session whose logon triggered it.
 
-The install can also create channels ahead of time, for the accounts a home
-configuration names, so that only accounts nobody foresaw take the first
-sign-in path; that is winpkgs work.
+### Channels made before anyone signs in
+
+The task can only see the sessions signed in, so an account's channel is made
+at its first sign-in, and that sign-in is the one time a unit's output waits
+on the task. `--account <name>`, repeated, names accounts to make a channel
+for besides those: the winpkgs module passes the account each of
+`winpkgs.homes` is for, so a machine's own users have their channels from the
+install and only an account the configuration never named takes the
+first-sign-in path.
+
+Names and not SIDs, which is the choice worth writing down. A SID would be
+the exact thing -- it is what the channel is named after, and it needs
+nothing resolved -- but a local account's SID does not exist until somebody
+creates the account, and a configuration that declares the account is written
+before that. Its *name* is known as soon as it has been decided on. So the
+task resolves each name with `LookupAccountName` when it runs, which needs no
+privilege at all: an ordinary user's run resolves them (checked, 2026-09-15),
+where the session enumeration beside it fails without `SeTcbPrivilege`. The
+names are literals in the task's action like the size, so the task stays one
+that users may run and may not change.
+
+A name may not resolve, and that is ordinary rather than a failure: an image
+declares an account that Setup has not created yet, and a run that refused to
+go on would cost every other account its channel at every logon until it was.
+Such a name is passed over and named in the report, and the account gets a
+channel at its first sign-in as it would have. So is a name that resolves to
+something that is not a user: `LookupAccountName` calls `SYSTEM` and
+`Everyone` well-known groups, not users, and a channel granted to one of
+those is a channel no account could write to as itself.
+
+`--uninstall` is the one thing that is not a flag among the others. It is the
+whole command line or it is refused, so that an account name -- the only part
+of the line that comes from a configuration rather than from steward -- can
+never turn a provisioning run into one that removes every channel on the
+machine. The winpkgs module refuses a `"` in a name for the same reason, at
+evaluation: Windows does not allow one in an account name either.
+
+What has been run for this, on the machine of the measurements above
+(2026-09-15): an unelevated `provision-eventlog --account` resolving the
+signed-in account's name to the very SID `whoami /user` gives, while the
+session enumeration beside it failed for want of `SeTcbPrivilege`; a name
+nothing maps and `SYSTEM` both passed over and named; and the manifest
+written with the resolved account's channel in it. Not run: the elevated
+import that follows, and an account's first sign-in with its channel already
+there -- the same second account the measurements above wanted and did not
+have.
 
 ## Control plane
 

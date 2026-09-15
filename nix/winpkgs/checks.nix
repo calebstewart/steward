@@ -30,6 +30,29 @@ let
   bytes = sized 100000000;
   tooSmall = builtins.tryEval (sized (1024 * 1024)).config.services.steward.eventlog.channelSize;
 
+  # The channels of the accounts a configuration names (#41): the homes it
+  # declares by default, and whatever else it lists.
+  homed = machine.extendModules {
+    modules = [ { winpkgs.homes = [ user ]; } ];
+  };
+  named = machine.extendModules {
+    modules = [
+      {
+        services.steward.eventlog.accounts = [
+          "Caleb Stewart"
+          "guest"
+        ];
+      }
+    ];
+  };
+  # A `"` in a name would end the quotes the action puts around it; refused
+  # at evaluation, not written into a task.
+  quoted = builtins.tryEval (
+    (machine.extendModules {
+      modules = [ { services.steward.eventlog.accounts = [ ''a"b'' ]; } ];
+    }).config.system.build.document
+  );
+
   trigger = "whkdrc v1";
   user = winpkgs.lib.homeConfiguration {
     inherit system;
@@ -130,7 +153,10 @@ in
         doc = document machine;
         kibDoc = document kib;
         bytesDoc = document bytes;
+        homedDoc = document homed;
+        namedDoc = document named;
         tooSmallEvaluates = lib.boolToString tooSmall.success;
+        quotedEvaluates = lib.boolToString quoted.success;
         closure = machine.config.system.build.toplevel;
         nativeBuildInputs = [ pkgs.jq ];
       }
@@ -187,6 +213,21 @@ in
         # And a size Windows would raise is refused at evaluation, not left
         # for a task that would fail at every logon.
         test "$tooSmallEvaluates" = false
+
+        # The accounts a configuration names get their channels at the
+        # install rather than at their first sign-in (#41): by default the
+        # account each of `winpkgs.homes` is for, read out of the home's own
+        # name, and quoted, since a Windows account name may hold spaces.
+        test "$(task arguments "$homedDoc")" = 'provision-eventlog --channel-size 64MiB --account "user"'
+        test "$(task arguments "$namedDoc")" = 'provision-eventlog --channel-size 64MiB --account "Caleb Stewart" --account "guest"'
+        # The same one command line, so the install-time run happens again
+        # when an account is added.
+        test "$(eventlog command "$namedDoc")" = "$(eventlog command)"
+        test "$(eventlog revision "$namedDoc")" != "$(eventlog revision)"
+        # A `"` in a name would end those quotes and make the rest of it
+        # arguments of its own; refused at evaluation. Windows does not allow
+        # one in an account name either.
+        test "$quotedEvaluates" = false
         touch $out
       '';
 

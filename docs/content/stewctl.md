@@ -262,7 +262,10 @@ is no `.log.1`.
 Until your channel exists, `logs` says so and exits 1. The manager asks the
 provisioning task to create it as soon as it starts a unit and finds it
 missing, which takes well under a second, and holds the units' output until
-then; from then on the channel is there before the manager is.
+then; from then on the channel is there before the manager is. An install
+that named your account (`services.steward.eventlog.accounts`, which is every
+account winpkgs manages a home for, or `--account` on the task) made your
+channel then, so you never see this at all.
 
 If the manager cannot start a unit's `steward-cat` at all, that unit's output
 falls back to its log file for the run, and `stewctl status` says so. `logs`
