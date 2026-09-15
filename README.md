@@ -246,13 +246,12 @@ the task runs as SYSTEM, so `0x1200a9` lets ordinary users see it and run it
 while withholding the right to rewrite what it runs. Granting even that much
 is only safe because running it cannot change what it does: the size and the
 account names are written into the task, and there is nothing a user who runs
-it can pass -- `--uninstall`, which would remove every channel on the machine,
-is refused unless it is the whole command line, so a name cannot smuggle it
-in. The
-three settings above that are not Windows' defaults each matter: `Queue` so
-that two people signing in at once does not cost one of them a channel, and
-the two battery settings so that a laptop away from its charger still gets
-one.
+it can pass -- `--uninstall`, which would remove every channel on the
+machine, is refused unless it is the whole command line, so a name cannot
+smuggle it in. The three settings above that are not Windows' defaults each
+matter: `Queue` so that two people signing in at once does not cost one of
+them a channel, and the two battery settings so that a laptop away from its
+charger still gets one.
 
 The last line runs it once for whoever is signed in already, and for whoever
 `--account` named; everyone else gets a channel at their next sign-in. It
@@ -261,8 +260,7 @@ this prompt, because finding who is signed in takes SYSTEM's privilege: run
 by an administrator, the program passes over every session and makes only the
 channels of the accounts it was told about. Running it again changes nothing
 unless somebody has signed in, or been named, who had not before. Each run
-leaves an account of itself in
-`%ProgramData%\steward\provision-eventlog.log`.
+leaves an account of itself in `%ProgramData%\steward\provision-eventlog.log`.
 
 `--account` names an account to make a channel for whether it is signed in or
 not, and may be given once for each account you know the machine is for. It
