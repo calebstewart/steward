@@ -326,6 +326,28 @@ differently: it has no buffer, so a mark written while nobody listens goes
 to `steward.log` instead, beside the line saying nobody does, which is
 exactly what a reader diagnosing the race wants to find.
 
+The events are TraceLogging, so a record carries its own message and steward
+ships no compiled event templates. The manifest names the binary that did the
+registering as each provider's resource file because the schema demands the
+attribute, not because anything is in it, and `wevtutil im` says "Failed to
+load resource" and imports it anyway. What a reader sees then depends on
+which of two paths they take. The message is in the record --
+`EvtRender(EvtRenderEventXml)` returns a `RenderingInfo Culture='zxx'`
+holding it, and `EvtFormatMessage(EvtFormatMessageEvent)` gives the same text
+back with no publisher metadata at all -- which is what Event Viewer's
+General tab and `wevtutil qe /f:text` show. Anything that insists on opening
+the publisher's metadata first fails, because a Rust binary has no resource
+section: `EvtOpenPublisherMetadata` returns `ERROR_INVALID_PARAMETER`,
+`wevtutil gp` says "The specified image file did not contain a resource
+section", `Get-WinEvent` repeats that as a non-terminating error on every
+call and leaves `.Message` at its own "Cannot retrieve event message text.",
+and `wevtutil qe /f:RenderedXml` appends a second `RenderingInfo
+Culture='en-US'` whose message is "The operation completed successfully."
+Every one of them still returns the events and all three fields. So a message
+resource would buy back those consumers' formatting and no data at all, which
+is not worth a `mc.exe` step in a build that cross-compiles on Linux;
+`stewctl logs` reads the fields and never goes near the part that complains.
+
 A `%` in a line goes into the channel as `％`, U+FF05 FULLWIDTH PERCENT SIGN,
 and `stewctl logs` turns it back. The Event Log reads a `%` in a TraceLogging
 string as the start of an insertion when it renders the event: `%%`, `%1` to
@@ -417,7 +439,7 @@ created by the task and written through the manager and the real shim:
 | Manager killed, a new one adopting, a hand-over, and a third adopting, while a unit wrote 100 lines/s | The same shim throughout; 2,922 of 2,922 lines, in order |
 | Node, Windows PowerShell 5.1, curl's progress meter, `cmd`, a Rust program, each to a file and to the channel | The same text; a line written without a newline appears in the channel when its newline does, as under journald |
 | Storage | 1,330 bytes of `.evtx` a record for an 80-byte line; 2,374 for this machine's komorebi lines (7.2 times the text), so 64 MiB holds about 28,000 of them |
-| Event Viewer | The General tab shows a message built from the fields -- `Output`, then `unit`, `stream` and `bytes` -- and the Details tab the fields themselves |
+| Event Viewer | The General tab shows a message built from the fields -- `Output`, then `unit`, `stream` and `bytes` -- and the Details tab the fields themselves. The message is in the record, not in publisher metadata: `EvtRender` returns it in a `RenderingInfo Culture='zxx'`, `EvtFormatMessage(EvtFormatMessageEvent)` returns it with a null publisher handle, and `wevtutil qe /f:text` prints it as the description, on 2026-09-15 against the live channel |
 
 What it costs, and what to keep an eye on:
 
