@@ -74,7 +74,11 @@ session.
   output is read by a small `steward-cat` of its own, which writes one event
   per line to your channel. A manager crash or an upgrade leaves it reading,
   so neither breaks a service's output — a program writing into a closed pipe
-  can crash — and `stewctl logs` works with no manager at all. Where the
+  can crash — and `stewctl logs` works with no manager at all. If a shim dies
+  while its unit is still running, the manager starts another on the same
+  pipes, within milliseconds and without the unit's writes ever failing; only
+  the line the dead one was in the middle of is lost. After five replacements
+  in a minute it stops and sends that unit's output to its log file. Where the
   machine has no channel for you, or a unit says `StandardOutput=file`,
   output goes straight to the unit's log file through an inherited handle.
 - **One thread, one completion port.** Process exits, job notifications, and
@@ -109,7 +113,7 @@ separators in it.
 | `%APPDATA%\steward\units\` | Your units: `*.service`, `*.target`, `*.timer`. |
 | `%LOCALAPPDATA%\steward\steward.log` | The manager's own log, always a file; set aside as `steward.log.1` past 8 MiB. |
 | Event Log channel `Steward/<your SID>` | Each unit's output and steward's lines about it, one event per line, where the install gave you a channel: 64 MiB for all of your units unless the install says otherwise (`services.steward.eventlog.channelSize`), oldest overwritten. Readable by you, administrators and SYSTEM. Read by `stewctl logs`, Event Viewer or `Get-WinEvent`. |
-| `%LOCALAPPDATA%\steward\logs\<unit>.log` | The same, for a unit that says `StandardOutput=file`, on a machine without the channels, or for a run whose `steward-cat` could not start; set aside as `<unit>.log.1` past 8 MiB, at a start or during the run. |
+| `%LOCALAPPDATA%\steward\logs\<unit>.log` | The same, for a unit that says `StandardOutput=file`, on a machine without the channels, or for a run whose `steward-cat` could not start or kept dying; set aside as `<unit>.log.1` past 8 MiB, at a start or during the run. |
 | `%LOCALAPPDATA%\steward\state-<session>.json` | The session's processes, units at rest, active targets and timer schedules. Removed once a stop of everything completes. |
 | `%LOCALAPPDATA%\steward\timers\<unit>` | When a `Persistent=` timer last elapsed. Per user, so it survives sign-out. |
 

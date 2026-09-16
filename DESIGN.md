@@ -383,9 +383,29 @@ output goes to its file keeps them: the unit writes that file itself.
 If the shim cannot be started at all, the unit's output falls back to its
 file for that run, and both `steward.log` and `stewctl status` say so. If a
 running shim exits with the unit still going -- it crashed, or something
-ended it -- the running processes' output is lost from that moment (there is
-nothing left reading their pipe), and the next thing written to the pipe
-fails; that too is said in both places. `rotate_log` and the periodic size
+ended it -- the manager starts another on the same two pipes. It can, because
+it keeps a copy of each read end for exactly this: not to read, only to hand
+to a replacement. The unit's processes hold the handles they were started
+with and cannot be told to write anywhere else, so replacing the reader is
+the only repair there is. The unit's writes never fail and nothing of what
+the pipes hold is lost; what goes is what the dead shim had read and not yet
+written, at most the one line it was in the middle of, and anything it was
+still holding for a channel nobody listened to yet, which went with its
+memory. The manager writes a mark of its own into the channel between the two
+shims' events, at warning level, naming both: that is where the gap is, and
+neither shim can say how many bytes it was, so no `Dropped` event claims a
+number it would have to invent.
+
+The price is that until the replacement reads, the unit's writes wait rather
+than fail: a pipe with 64 KiB in it and nothing draining blocks its writer.
+So the manager gives up after **five replacements inside a minute**, closes
+its read ends, and leaves the unit's writes failing as they did before, with
+what steward starts for it next going to its file. The two ways a shim dies
+want opposite things -- one ended from outside wants replacing however long
+the unit runs, one that cannot run at all wants giving up on before the unit
+is stopped on a full pipe -- and the window tells them apart: a shim killed
+once an hour never reaches five inside a minute, and one that dies as it
+starts reaches it in a tenth of a second. `rotate_log` and the periodic size
 check skip a unit whose output is in the channel, since it has no file
 growing; a unit that has fallen back to its file is measured like any other.
 
@@ -451,12 +471,36 @@ What it costs, and what to keep an eye on:
   `.log.1` held about a week. A chatty unit also ages out a quiet one's
   history, since they share the channel. `channelSize` is the answer where it
   matters; whether its default should grow is open.
-- **A dead shim can take its unit with it.** A file never breaks; a pipe
-  whose reader has gone does. With the shim killed, Node exited, the Rust
-  program's writes failed (one that `println!`s would panic) and Windows
-  PowerShell carried on with its output lost. The shim is small and has not
-  been seen to crash on its own, but a manager that kept a copy of the read
-  end could start a replacement on the same pipe.
+- **A dead shim costs a line, not the unit** -- since #42, and only while a
+  manager that made the pipes is there. A file never breaks; a pipe whose
+  reader has gone does, and when the shim was killed under #28's three
+  writers Node exited, the Rust program's writes failed and Windows
+  PowerShell carried on with its output lost. The manager now starts a
+  replacement on the same pipes. Measured on 2026-09-15 with the shim killed
+  under each of the three, every one of them writing 1,200 numbered lines at
+  40 a second: all three ran to the end and exited cleanly, and all 1,200
+  lines of each reached the channel, none missing and none twice. Across
+  eleven kills the replacement started between 0.8 ms and 26 ms after the
+  exit it answered. At 5,000 lines a second, five kills cost two lines in
+  all -- three of them cost nothing, two cost the single line the dead shim
+  was in the middle of -- and two kills left the writer's longest single
+  write at 0.9 ms, under the 7.1 ms of the same run with nothing killed: the
+  64 KiB pipe covers the replacement at any rate the channel keeps up with.
+  Past five replacements in a minute the manager gives up, which was
+  measured too: the sixth death sent the unit to its file and its next
+  `println!` panicked, and after a quiet 70 s the allowance came back.
+- **A manager that did not make the pipes cannot protect the shim.** The
+  read ends the replacement needs are the crashed or handed-over manager's,
+  and they go with it, so until the unit's next run its shim is as exposed
+  as it was before #42. A new manager could get one back: measured on
+  2026-09-15, a non-elevated program of the same user opened a live
+  `steward-cat` with `PROCESS_DUP_HANDLE`, duplicated both read ends by the
+  numbers on the shim's own command line, and -- with the manager and the
+  shim then both killed -- read the unit's output (lines 160 to 224) through
+  the duplicate. What is missing is a check that the number still names that
+  pipe rather than whatever the shim opened later, which `GetFileType` does
+  not give; the manager would also have to save the numbers with the shim's
+  PID. Not done: #48.
 - **Loss past about 100,000 lines a second is silent**, as #25 found: ETW
   drops, `EventWrite` still succeeds, and no line can mark the gap the way
   the file's set-aside line does.

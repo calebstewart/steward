@@ -273,7 +273,10 @@ account winpkgs manages a home for, or `--account` on the task) made your
 channel then, so you never see this at all.
 
 If the manager cannot start a unit's `steward-cat` at all, that unit's output
-falls back to its log file for the run, and `stewctl status` says so. `logs`
+falls back to its log file for the run, and `stewctl status` says so. So does
+a unit whose shim has died five times in a minute; one that dies once is
+replaced on the same pipes, and the channel carries a warning event between
+the two shims' output saying where the gap is. `logs`
 then reads the file, as for any `file` unit: it asks the manager where the
 output went for this run rather than trusting the unit file alone.
 
