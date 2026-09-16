@@ -9,6 +9,10 @@
 //! which SYSTEM holds and an administrator does not, and the provisioning
 //! runs as SYSTEM for this among other reasons.
 //!
+//! This is the half of the provisioning that finds the accounts nobody named.
+//! The ones an install did name are resolved by [`super::account`], which
+//! needs no privilege at all.
+//!
 //! Nothing here fails because one session did. Sessions are enumerated and
 //! then asked about one at a time, and a user can sign out in between -- a
 //! race with no upper bound, since the list is a snapshot -- so a session
@@ -18,15 +22,14 @@
 use std::io;
 use std::os::windows::io::AsRawHandle;
 
-use windows_sys::Win32::Foundation::{LocalFree, HANDLE};
-use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, PSID, TOKEN_USER};
+use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_USER};
 use windows_sys::Win32::System::RemoteDesktop::{
     WTSActive, WTSDisconnected, WTSEnumerateSessionsW, WTSFreeMemory, WTSQueryUserToken,
     WTS_CURRENT_SERVER_HANDLE, WTS_SESSION_INFOW,
 };
 
-use super::{check, owned};
+use super::{check, owned, string_sid};
 
 /// What an enumeration found.
 pub struct SignedIn {
@@ -109,15 +112,4 @@ fn sid_of(session: u32) -> io::Result<String> {
     })?;
     let user: &TOKEN_USER = unsafe { &*buffer.as_ptr().cast() };
     string_sid(user.User.Sid)
-}
-
-/// A SID as `S-1-5-21-...`, the only form the manifest and the access
-/// descriptors are written in.
-fn string_sid(sid: PSID) -> io::Result<String> {
-    let mut text = std::ptr::null_mut();
-    check(unsafe { ConvertSidToStringSidW(sid, &mut text) })?;
-    let length = (0..).take_while(|&i| unsafe { *text.add(i) } != 0).count();
-    let sid = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) });
-    unsafe { LocalFree(text.cast()) };
-    Ok(sid)
 }

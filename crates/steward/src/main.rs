@@ -5,12 +5,14 @@
 //!   steward --console    run in the foreground until Ctrl+C (development)
 //!   steward --ctrl-c PID...
 //!                        (internal) deliver Ctrl+C to the consoles of PIDs
-//!   steward provision-eventlog [--channel-size SIZE | --uninstall]
-//!                        create the signed-in users' Event Log channels,
-//!                        each SIZE at most, or remove every channel it has
-//!                        made. Run as SYSTEM by a Scheduled Task at every
-//!                        logon, which the install declares rather than this
-//!                        registering it.
+//!   steward provision-eventlog [--channel-size SIZE] [--account NAME]...
+//!   steward provision-eventlog --uninstall
+//!                        create the Event Log channels of the signed-in
+//!                        users and of the accounts named, each SIZE at
+//!                        most, or remove every channel it has made. Run as
+//!                        SYSTEM by a Scheduled Task at every logon, which
+//!                        the install declares rather than this registering
+//!                        it.
 //!
 //! Either way the manager is the same code: `manager::run`, fed controls by
 //! the SCM's control handler or the console's Ctrl+C handler.
@@ -45,23 +47,14 @@ fn main() {
         }
         Some("provision-eventlog") => {
             let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
-            let done = match rest[..] {
-                [] => eventlog::provision(Default::default()),
-                ["--channel-size", size] => match size.parse() {
-                    Ok(size) => eventlog::provision(size),
-                    Err(e) => fail(
-                        2,
-                        &format!("steward provision-eventlog: --channel-size: {e}"),
-                    ),
-                },
-                ["--uninstall"] => eventlog::uninstall(),
-                _ => fail(
+            let done = match eventlog::Job::parse(&rest) {
+                Ok(eventlog::Job::Provision { size, accounts }) => {
+                    eventlog::provision(size, &accounts)
+                }
+                Ok(eventlog::Job::Uninstall) => eventlog::uninstall(),
+                Err(e) => fail(
                     2,
-                    "usage: steward provision-eventlog [--channel-size SIZE]\n\
-                     \x20      steward provision-eventlog --uninstall\n\
-                     \x20 creates the channels, each SIZE at most (bytes, or KiB, MiB or\n\
-                     \x20 GiB, as in 128MiB; 64MiB if not given). The Scheduled Task that\n\
-                     \x20 runs it is declared by the install, not by steward.",
+                    &format!("steward provision-eventlog: {e}\n{}", eventlog::USAGE),
                 ),
             };
             if let Err(e) = done {
@@ -70,7 +63,10 @@ fn main() {
         }
         _ => {
             eprintln!("usage: steward [--console | --version]");
-            eprintln!("       steward provision-eventlog [--channel-size SIZE | --uninstall]");
+            eprintln!(
+                "       steward provision-eventlog [--channel-size SIZE] [--account NAME]..."
+            );
+            eprintln!("       steward provision-eventlog --uninstall");
             eprintln!("  (with no arguments steward expects to be started by the SCM)");
             std::process::exit(2);
         }

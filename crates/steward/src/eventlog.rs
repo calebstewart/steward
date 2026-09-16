@@ -24,22 +24,25 @@
 //! granting ordinary users read and execute but not write. That last one
 //! matters because the task runs as SYSTEM: a user who could rewrite its
 //! action could run anything as SYSTEM. It is safe to grant because whoever
-//! runs the task cannot change what it does. It takes one argument,
-//! `--channel-size`, but as a literal in the action the administrator
-//! declared: the action has no `$(Arg0)` for a caller's parameters to be
-//! substituted into, so running it on demand runs exactly that.
+//! runs the task cannot change what it does. Its arguments,
+//! `--channel-size` and `--account`, are literals in the action the
+//! administrator declared: the action has no `$(Arg0)` for a caller's
+//! parameters to be substituted into, so running it on demand runs exactly
+//! that.
 //!
 //! Three things happen in a run, in order, and each is skipped when it has
 //! nothing to do:
 //!
-//! 1. the sessions signed in are enumerated and resolved to SIDs;
+//! 1. the sessions signed in are enumerated and resolved to SIDs, and every
+//!    `--account` the install named is resolved to one as well;
 //! 2. those, plus every SID the manifest already names, are written back as
 //!    the manifest, and it is imported if it changed in anything but its
 //!    size, or if a channel it names has gone missing;
 //! 3. each channel's access descriptor and size are checked, and set if
 //!    they are wrong.
 //!
-//! Running it again with the same sessions writes nothing at all.
+//! Running it again with the same sessions and accounts writes nothing at
+//! all.
 //!
 //! One channel that cannot be enabled does not cost the others their run.
 //! The import then installs everything and still fails, and the channel
@@ -55,7 +58,7 @@ use std::time::{Duration, Instant};
 
 use steward_eventlog::{channel_access, channel_name, manifest, sids_in, size_in, ChannelSize};
 
-use crate::sys::session;
+use crate::sys::{account, session};
 
 /// Where the manifest lives: machine-wide state, beside no binaries.
 ///
@@ -257,9 +260,96 @@ impl Report {
     }
 }
 
+/// What `steward provision-eventlog` was asked for, read off its command
+/// line.
+///
+/// Parsed apart from being carried out so that the parsing can be tested.
+/// This command line is the whole of the interface between whatever declared
+/// the task -- `provisionArgs` in `nix/winpkgs/system.nix`, or the
+/// `<Arguments>` of the README's by-hand registration -- and this program,
+/// and the two are written in different places by different hands.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Job {
+    /// Make the channels: every channel `size` at most, and one for each
+    /// account named besides the sessions signed in.
+    Provision {
+        size: ChannelSize,
+        accounts: Vec<String>,
+    },
+    /// Remove every channel steward has made.
+    Uninstall,
+}
+
+/// What to say to whoever asked for something else.
+pub const USAGE: &str = "\
+usage: steward provision-eventlog [--channel-size SIZE] [--account NAME]...
+       steward provision-eventlog --uninstall
+  creates a channel for each signed-in session and for each account named,
+  every channel SIZE at most (bytes, or KiB, MiB or GiB, as in 128MiB;
+  64MiB if not given). An account is named as Windows names it (`caleb`,
+  `DOMAIN\\caleb`, or a display name in quotes); one that does not resolve
+  is passed over and said so. The Scheduled Task that runs this is declared
+  by the install, not by steward.";
+
+impl Job {
+    /// The arguments of `provision-eventlog`, as a job or as the complaint
+    /// to make about them.
+    ///
+    /// Every flag takes a value, and every value belongs to the flag before
+    /// it, which is what makes the shape of this checkable at all. Note
+    /// what `--uninstall` is *not*: a flag among the others. It is the whole
+    /// command line or it is refused, so no value of another flag can turn a
+    /// provisioning run into one that removes every channel on the machine
+    /// -- an account name is the one part of the line that comes from a
+    /// configuration rather than from steward.
+    pub fn parse(args: &[&str]) -> Result<Job, String> {
+        if args == ["--uninstall"] {
+            return Ok(Job::Uninstall);
+        }
+        let mut size = None;
+        let mut accounts = Vec::new();
+        let mut at = 0;
+        while at < args.len() {
+            let flag = args[at];
+            let value = args.get(at + 1).copied();
+            match flag {
+                "--channel-size" => {
+                    let value = value.ok_or("--channel-size wants a size")?;
+                    if size.is_some() {
+                        return Err("--channel-size is given once".to_string());
+                    }
+                    size = Some(
+                        value
+                            .parse::<ChannelSize>()
+                            .map_err(|e| format!("--channel-size: {e}"))?,
+                    );
+                }
+                "--account" => {
+                    let value = value.ok_or("--account wants an account name")?;
+                    if value.is_empty() {
+                        return Err("--account wants an account name".to_string());
+                    }
+                    accounts.push(value.to_string());
+                }
+                "--uninstall" => return Err(
+                    "--uninstall removes every channel steward has made, and takes nothing else"
+                        .to_string(),
+                ),
+                _ => return Err(format!("`{flag}` is not an argument of provision-eventlog")),
+            }
+            at += 2;
+        }
+        Ok(Job::Provision {
+            size: size.unwrap_or_default(),
+            accounts,
+        })
+    }
+}
+
 /// What the task does at every logon: a channel of `size` for everyone who
-/// is signed in or ever has been.
-pub fn provision(size: ChannelSize) -> io::Result<Report> {
+/// is signed in or ever has been, and for each of `accounts`, the accounts
+/// the install knows the machine is for.
+pub fn provision(size: ChannelSize, accounts: &[String]) -> io::Result<Report> {
     let mut report = Report::default();
     let path = manifest_path()?;
     let exe = std::env::current_exe()?;
@@ -273,26 +363,50 @@ pub fn provision(size: ChannelSize) -> io::Result<Report> {
         report.say(format!("no user to name in {note}"));
     }
 
+    // And the accounts the install named, signed in or not: the homes a
+    // winpkgs configuration declares, or the `--account` an administrator
+    // wrote into the task by hand. Their channels are made at the install
+    // rather than at a first sign-in, which is the whole point of naming
+    // them -- only an account nobody foresaw is left to race its first
+    // sign-in. Resolving a name needs no privilege, unlike the enumeration
+    // above; an elevated administrator's run creates these and nothing else.
+    //
+    // A name that resolves to nothing is passed over and said so, not
+    // raised: a local account a configuration declares may not have been
+    // created yet, and one that has not must not cost everyone else their
+    // channel at every logon until it is.
+    let mut named = Vec::new();
+    for name in accounts {
+        match account::sid_of(name) {
+            Ok(sid) => named.push(sid),
+            Err(e) => report.say(format!("no channel for `{name}`: {e}")),
+        }
+    }
+
     // Plus everyone who has had a channel before, so that signing out never
     // takes a channel -- or its history -- away.
     let before = std::fs::read_to_string(&path).unwrap_or_default();
     let mut sids = sids_in(&before);
     let known = sids.len();
     sids.extend(found.sids.iter().cloned());
+    sids.extend(named.iter().cloned());
 
     let text = manifest(&sids, &exe, size);
     let after = sids_in(&text);
     report.say(format!(
-        "{} signed in, {known} known already, {} channels",
+        "{} signed in, {} of {} accounts named, {known} known already, {} channels",
         found.sids.len(),
+        named.len(),
+        accounts.len(),
         after.len()
     ));
 
     // Nobody to give a channel to and none ever given: importing a manifest
     // that declares nothing would register nothing and leave a file saying
-    // so. This is what a run by hand without `SeTcbPrivilege` looks like --
-    // every session passed over -- and it should change nothing rather than
-    // write an empty record over a machine's history.
+    // so. This is what a run by hand without `SeTcbPrivilege` and without
+    // `--account` looks like -- every session passed over and no account
+    // named -- and it should change nothing rather than write an empty
+    // record over a machine's history.
     if after.is_empty() {
         report.say("no channels to provision");
         report.keep();
@@ -585,7 +699,121 @@ pub fn uninstall() -> io::Result<Report> {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand, Listing};
+    use super::{expand, Job, Listing};
+    use steward_eventlog::ChannelSize;
+
+    fn parse(args: &[&str]) -> Result<Job, String> {
+        Job::parse(args)
+    }
+
+    fn provision(size: &str, accounts: &[&str]) -> Result<Job, String> {
+        Ok(Job::Provision {
+            size: size.parse().unwrap(),
+            accounts: accounts.iter().map(|a| a.to_string()).collect(),
+        })
+    }
+
+    /// The command lines the install actually writes: the task's action as
+    /// `nix/winpkgs/system.nix` builds it and as the README's `<Arguments>`
+    /// has it, and the bare run with neither flag.
+    #[test]
+    fn the_command_lines_the_install_writes() {
+        assert_eq!(
+            parse(&[]),
+            Ok(Job::Provision {
+                size: ChannelSize::DEFAULT,
+                accounts: Vec::new()
+            })
+        );
+        assert_eq!(parse(&["--channel-size", "64MiB"]), provision("64MiB", &[]));
+        assert_eq!(
+            parse(&["--channel-size", "128MiB", "--account", "Caleb Stewart"]),
+            provision("128MiB", &["Caleb Stewart"])
+        );
+        assert_eq!(parse(&["--uninstall"]), Ok(Job::Uninstall));
+    }
+
+    /// An account per home, in the order the configuration named them, and
+    /// a name with a space or a domain in it kept whole: the task's action
+    /// is one string, and what a name is is Windows' business, not this
+    /// parser's.
+    #[test]
+    fn every_account_named_is_kept_in_order() {
+        assert_eq!(
+            parse(&[
+                "--channel-size",
+                "64MiB",
+                "--account",
+                "Caleb Stewart",
+                "--account",
+                "DOMAIN\\guest",
+                "--account",
+                "caleb@example.com",
+            ]),
+            provision(
+                "64MiB",
+                &["Caleb Stewart", "DOMAIN\\guest", "caleb@example.com"]
+            )
+        );
+        // The flags are in no fixed order, and the size may be left out.
+        assert_eq!(
+            parse(&["--account", "a", "--channel-size", "1GiB", "--account", "b"]),
+            provision("1GiB", &["a", "b"])
+        );
+        assert_eq!(
+            parse(&["--account", "a"]),
+            Ok(Job::Provision {
+                size: ChannelSize::DEFAULT,
+                accounts: vec!["a".to_string()]
+            })
+        );
+    }
+
+    /// `--uninstall` is the whole command line or it is refused. So an
+    /// account name -- the one part of the line that comes from a
+    /// configuration rather than from steward -- can never turn a
+    /// provisioning run into one that removes every channel on the machine,
+    /// however it was quoted on the way in.
+    #[test]
+    fn uninstall_is_never_one_flag_among_others() {
+        for args in [
+            vec!["--uninstall", "--channel-size", "64MiB"],
+            vec!["--channel-size", "64MiB", "--uninstall"],
+            vec!["--account", "a", "--uninstall"],
+            vec!["--uninstall", "--uninstall"],
+        ] {
+            let e = parse(&args).expect_err(&args.join(" "));
+            assert!(e.contains("takes nothing else"), "{args:?}: {e}");
+        }
+        // As a *value* it is an account name like any other, and so is
+        // looked up and passed over, not obeyed.
+        assert_eq!(
+            parse(&["--account", "--uninstall"]),
+            provision("64MiB", &["--uninstall"])
+        );
+    }
+
+    /// A command line steward cannot make sense of is refused with a word
+    /// about which part, rather than acted on in part: the task runs at
+    /// every logon, and the report is all anyone reads.
+    #[test]
+    fn what_is_refused_and_what_is_said_about_it() {
+        let complaint = |args: &[&str]| parse(args).expect_err(&args.join(" "));
+        assert!(complaint(&["--channel-size"]).contains("wants a size"));
+        assert!(complaint(&["--account"]).contains("wants an account name"));
+        assert!(complaint(&["--account", ""]).contains("wants an account name"));
+        assert!(complaint(&["--channel-size", "1MiB"]).contains("less than 1028KiB"));
+        assert!(complaint(&["--channel-size", "lots"]).contains("is not a size"));
+        assert!(
+            complaint(&["--channel-size", "64MiB", "--channel-size", "1GiB"])
+                .contains("given once")
+        );
+        assert!(complaint(&["--size", "64MiB"]).contains("`--size` is not an argument"));
+        // A value with no flag in front of it, which is what a name given
+        // without `--account` looks like.
+        assert!(complaint(&["Caleb Stewart"]).contains("is not an argument"));
+        assert!(complaint(&["--channel-size", "64MiB", "extra"]).contains("is not an argument"));
+    }
 
     /// The descriptor, the size and the file, off a listing laid out as
     /// `wevtutil gl` lays one out (the Application channel's, 2026-09-14,

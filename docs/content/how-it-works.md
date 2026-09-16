@@ -114,10 +114,11 @@ separators in it.
 | `%LOCALAPPDATA%\steward\timers\<unit>` | When a `Persistent=` timer last elapsed. Per user, so it survives sign-out. |
 
 The channels are machine state, written by the provisioning task that runs as
-SYSTEM at every sign-in, and shared by every account on the machine:
+SYSTEM at every sign-in and once at the install, and shared by every account
+on the machine:
 
 | Path | |
 | --- | --- |
-| `%ProgramData%\steward\channels.man` | The manifest naming every channel the task has created, one per account that has signed in since the install. It only grows, and it is what the uninstall removes. |
+| `%ProgramData%\steward\channels.man` | The manifest naming every channel the task has created: one per account that has signed in since the install, and one per account the install named ahead of time (`services.steward.eventlog.accounts`). It only grows, and it is what the uninstall removes. |
 | `%ProgramData%\steward\provision-eventlog.log` | What the task's last run did, including any channel it could not enable. |
 | `%SystemRoot%\System32\winevt\Logs\Steward%4<SID>.evtx` | Each channel's records. Charged to the machine, not to your profile, and left behind when an account is deleted until the uninstall or an administrator removes it. |
