@@ -17,7 +17,7 @@ use std::str::FromStr;
 /// `wevtutil sl` and `gl` (2026-09-14).
 ///
 /// Written and read as bytes, or as a whole number of `KiB`, `MiB` or `GiB`
-/// (`128MiB`), which is how `steward provision-eventlog --channel-size` takes
+/// (`256MiB`), which is how `steward provision-eventlog --channel-size` takes
 /// it and how it is shown back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ChannelSize(u64);
@@ -36,24 +36,47 @@ impl ChannelSize {
     /// per line, and an Event Log record costs 1.2 to 1.5 KB of `.evtx`
     /// however short the line is -- measured on a real channel
     /// (2026-09-14): 1,471 bytes a line at 4,800 lines a second, 1,215 at
-    /// 77,000. Call it 700 to 850 lines per MiB and the length of the lines
-    /// barely matters. So 64 MiB is roughly 45,000 to 55,000 lines, for all
-    /// of a user's units together.
+    /// 77,000. A longer line costs more, but not in proportion: a line of a
+    /// real komorebi log, 7.2 times the length of an 80-byte one, cost
+    /// 2,374 bytes against 1,330. Call it 700 to 850 short lines per MiB,
+    /// or about 440 of a chatty daemon's, for all of a user's units
+    /// together.
     ///
-    /// That is much less history than the files hold: a unit's log may
-    /// reach 8 MiB (`steward::log::CAP`) with another 8 MiB set aside, which
-    /// at ordinary line lengths is a couple of hundred thousand lines, and
-    /// that is *per unit*. A channel is per user. The gap is the medium's,
-    /// not a number that can be tuned away -- matching it would want
-    /// gigabytes per user under `%SystemRoot%\System32\Winevt\Logs` -- so
-    /// what this number is chosen against is the disk instead: 64 MiB is
-    /// what four units' logs can already occupy in a profile today.
+    /// So what the number buys is time, and it is chosen to buy the week
+    /// the files held. Two days of one machine's units ran at 327 lines an
+    /// hour, komorebi's most of them (#28), and a quieter day of the same
+    /// machine's channel held 3,025 records across ten units at 1,756 bytes
+    /// each, komorebi's 78% of them (2026-09-15). At the busier rate 128
+    /// MiB is about seven days, where 64 MiB was three to four; at the
+    /// quieter it is three weeks. Komorebi's own 8 MiB log and its `.log.1`
+    /// held about a week.
     ///
-    /// Which is a judgement about a typical machine, and why an install can
-    /// say otherwise: a workstation with one chatty daemon wants more, and a
-    /// machine with many accounts on a small disk less, the channels being
-    /// charged to the machine rather than to any profile.
-    pub const DEFAULT: ChannelSize = ChannelSize(64 * MIB);
+    /// Time is what it can buy: the files' *bytes* are out of reach. A
+    /// unit's log may reach 8 MiB (`steward::log::CAP`) with another 8 MiB
+    /// set aside, and that is *per unit*, where a channel is per user;
+    /// carrying four of those through a medium that costs several times the
+    /// text would want gigabytes an account. The gap is the medium's, not a
+    /// number that can be tuned away.
+    ///
+    /// The size is a ceiling and not a reservation, which is what makes the
+    /// larger number cheap. A channel's `.evtx` grows as it is written and
+    /// stops there, as Windows' own do: on the machine above, Kernel-WHEA
+    /// is allowed 32 MiB and occupies 4, Windows Defender 16 and occupies
+    /// 6, steward's own 64 and occupied 5 after a day. An account that
+    /// signs in and runs little costs the 1 MiB floor whatever this says,
+    /// and only an account whose history is worth keeping ever spends the
+    /// rest.
+    ///
+    /// Which is still a judgement about a typical machine, and why an
+    /// install can say otherwise. The channels are charged to the machine,
+    /// one per account that has ever signed in, under
+    /// `%SystemRoot%\System32\Winevt\Logs` -- where that machine already
+    /// keeps 441 channels and 379 MiB nobody asked for, Application, System
+    /// and Security 20 MiB apiece. A machine with many accounts on a small
+    /// disk wants less; one with a daemon chattier than komorebi wants
+    /// more, or wants that daemon on `StandardOutput=file`, which gives it
+    /// a budget of its own again rather than letting it age out the rest.
+    pub const DEFAULT: ChannelSize = ChannelSize(128 * MIB);
 
     /// The least Windows will make a channel.
     pub const LEAST: ChannelSize = ChannelSize(1028 * KIB);
@@ -97,7 +120,7 @@ impl FromStr for ChannelSize {
         };
         if number.is_empty() || scale == 0 {
             return Err(format!(
-                "`{text}` is not a size: give bytes, or a whole number of KiB, MiB or GiB, as in 128MiB"
+                "`{text}` is not a size: give bytes, or a whole number of KiB, MiB or GiB, as in 256MiB"
             ));
         }
         let bytes = number
@@ -133,9 +156,9 @@ mod tests {
     }
 
     #[test]
-    fn the_default_is_64_mib() {
-        assert_eq!(ChannelSize::default().bytes(), 64 << 20);
-        assert_eq!(ChannelSize::DEFAULT.to_string(), "64MiB");
+    fn the_default_is_128_mib() {
+        assert_eq!(ChannelSize::default().bytes(), 128 << 20);
+        assert_eq!(ChannelSize::DEFAULT.to_string(), "128MiB");
     }
 
     #[test]

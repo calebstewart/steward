@@ -261,7 +261,7 @@ mod tests {
         assert!(text.contains("type=\"Operational\""));
         assert!(text.contains("isolation=\"Custom\""));
         assert!(text.contains(&format!("access=\"{}\"", channel_access(ONE))));
-        assert!(text.contains("<maxSize>67108864</maxSize>"));
+        assert!(text.contains("<maxSize>134217728</maxSize>"));
         assert!(text.contains(&format!("resourceFileName=\"{EXE}\"")));
         // TraceLogging: channels only.
         assert!(!text.contains("<template"));
@@ -338,10 +338,10 @@ mod tests {
     /// differs between two manifests at two sizes.
     #[test]
     fn every_channel_is_the_size_asked_for() {
-        let text = sized(&[ONE, TWO], "128MiB");
-        assert_eq!(text.matches("<maxSize>134217728</maxSize>").count(), 2);
+        let text = sized(&[ONE, TWO], "256MiB");
+        assert_eq!(text.matches("<maxSize>268435456</maxSize>").count(), 2);
         assert_eq!(text.matches("<maxSize>").count(), 2);
-        assert_eq!(text.replace("134217728", "67108864"), of(&[ONE, TWO]));
+        assert_eq!(text.replace("268435456", "134217728"), of(&[ONE, TWO]));
     }
 
     /// The size reads back out as it went in, and a file that names none,
@@ -367,7 +367,7 @@ mod tests {
         let was = size_in(&before).unwrap();
         // Resized: the same users at the old size are the old bytes.
         assert_eq!(manifest(&owned(&[ONE]), EXE, was), before);
-        assert_ne!(sized(&[ONE], "128MiB"), before);
+        assert_ne!(sized(&[ONE], "256MiB"), before);
         // A new user, or a new path, is a change whatever the size.
         assert_ne!(manifest(&owned(&[ONE, TWO]), EXE, was), before);
         assert_ne!(manifest(&owned(&[ONE]), r"D:\steward.exe", was), before);

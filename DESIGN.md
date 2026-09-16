@@ -460,17 +460,37 @@ created by the task and written through the manager and the real shim:
 | Flat out, about 1.1 million lines/s, for 500,000 lines | 442,758 lost, silently, as #25 found |
 | Manager killed, a new one adopting, a hand-over, and a third adopting, while a unit wrote 100 lines/s | The same shim throughout; 2,922 of 2,922 lines, in order |
 | Node, Windows PowerShell 5.1, curl's progress meter, `cmd`, a Rust program, each to a file and to the channel | The same text; a line written without a newline appears in the channel when its newline does, as under journald |
-| Storage | 1,330 bytes of `.evtx` a record for an 80-byte line; 2,374 for this machine's komorebi lines (7.2 times the text), so 64 MiB holds about 28,000 of them |
+| Storage | 1,330 bytes of `.evtx` a record for an 80-byte line; 2,374 for this machine's komorebi lines (7.2 times the text), so the 128 MiB default holds about 56,000 of them |
 | Event Viewer | The General tab shows a message built from the fields -- `Output`, then `unit`, `stream` and `bytes` -- and the Details tab the fields themselves. The message is in the record, not in publisher metadata: `EvtRender` returns it in a `RenderingInfo Culture='zxx'`, `EvtFormatMessage(EvtFormatMessageEvent)` returns it with a null publisher handle, and `wevtutil qe /f:text` prints it as the description, on 2026-09-15 against the live channel |
 
 What it costs, and what to keep an eye on:
 
 - **Retention is in lines, not megabytes.** This machine's units wrote about
-  17,000 lines in two days, most of them komorebi's, so a 64 MiB channel
-  holds three to four days of them, where komorebi's 8 MiB file and its
-  `.log.1` held about a week. A chatty unit also ages out a quiet one's
-  history, since they share the channel. `channelSize` is the answer where it
-  matters; whether its default should grow is open.
+  17,000 lines in two days, most of them komorebi's, which a 64 MiB channel
+  would have held three to four days of, where komorebi's 8 MiB file and its
+  `.log.1` held about a week. 64 MiB was chosen while the channel was opt-in
+  per unit; now that it is every unit's default the number has to cover what
+  those files covered, so on 2026-09-15 the default became **128 MiB**: a
+  week at that rate, and three weeks at the 3,025 records a day, 1,756 bytes
+  each, a quieter day of the same machine's channel actually held. It is a
+  ceiling and not a reservation -- an `.evtx` grows to it and no faster, as
+  Windows' own do, so an account that signs in and runs little still costs
+  about 1 MiB of the machine's disk, against the 379 MiB of channels this
+  machine already keeps without being asked. The files' *bytes* are out of
+  reach at any size: 8 MiB and a `.log.1` per unit, carried through a medium
+  that costs several times the text, would want gigabytes an account.
+- **A chatty unit ages out a quiet one's history**, since a user's units
+  share one channel where each had its own file budget. Nothing stops it,
+  and nothing is added to: the channel already answers who is responsible,
+  by grouping its records on their unit field (the command is under `logs`
+  in the documentation), which put 2,367 of one day's 3,025 records on
+  komorebi, 78% of them. A per-unit rate in `stewctl status` would not
+  answer it more cheaply, since the shim writes to ETW without the lines
+  passing through the manager at all: the manager would have to count what
+  it is the point of the shim that it never sees. The answer, once the unit
+  is known, is `StandardOutput=file` on that one, which gives it back its
+  own 8 MiB and a generation, or a larger `channelSize` to buy every unit
+  more.
 - **A dead shim costs a line, not the unit** -- since #42, and only while a
   manager that made the pipes is there. A file never breaks; a pipe whose
   reader has gone does, and when the shim was killed under #28's three

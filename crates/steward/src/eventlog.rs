@@ -285,8 +285,8 @@ pub const USAGE: &str = "\
 usage: steward provision-eventlog [--channel-size SIZE] [--account NAME]...
        steward provision-eventlog --uninstall
   creates a channel for each signed-in session and for each account named,
-  every channel SIZE at most (bytes, or KiB, MiB or GiB, as in 128MiB;
-  64MiB if not given). An account is named as Windows names it (`caleb`,
+  every channel SIZE at most (bytes, or KiB, MiB or GiB, as in 256MiB;
+  128MiB if not given). An account is named as Windows names it (`caleb`,
   `DOMAIN\\caleb`, or a display name in quotes); one that does not resolve
   is passed over and said so. The Scheduled Task that runs this is declared
   by the install, not by steward.";
@@ -725,7 +725,10 @@ mod tests {
                 accounts: Vec::new()
             })
         );
-        assert_eq!(parse(&["--channel-size", "64MiB"]), provision("64MiB", &[]));
+        assert_eq!(
+            parse(&["--channel-size", "128MiB"]),
+            provision("128MiB", &[])
+        );
         assert_eq!(
             parse(&["--channel-size", "128MiB", "--account", "Caleb Stewart"]),
             provision("128MiB", &["Caleb Stewart"])
@@ -789,7 +792,7 @@ mod tests {
         // looked up and passed over, not obeyed.
         assert_eq!(
             parse(&["--account", "--uninstall"]),
-            provision("64MiB", &["--uninstall"])
+            provision("128MiB", &["--uninstall"])
         );
     }
 

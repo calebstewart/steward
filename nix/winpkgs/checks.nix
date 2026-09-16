@@ -185,7 +185,7 @@ in
         test "$(task command)" = 'C:\Program Files\steward\steward.exe'
         # The size is a literal in the action, which is what keeps it safe to
         # let users run (#31).
-        test "$(task arguments)" = 'provision-eventlog --channel-size 64MiB'
+        test "$(task arguments)" = 'provision-eventlog --channel-size 128MiB'
         # As SYSTEM, at the logon of any user: no `user` on the trigger.
         test "$(task runAs)" = 'S-1-5-18'
         test "$(jq -r '.resources[] | select(.type == "winpkgs/task") | .properties.triggers[0].type' <<<"$doc")" = logon
@@ -218,8 +218,8 @@ in
         # install rather than at their first sign-in (#41): by default the
         # account each of `winpkgs.homes` is for, read out of the home's own
         # name, and quoted, since a Windows account name may hold spaces.
-        test "$(task arguments "$homedDoc")" = 'provision-eventlog --channel-size 64MiB --account "user"'
-        test "$(task arguments "$namedDoc")" = 'provision-eventlog --channel-size 64MiB --account "Caleb Stewart" --account "guest"'
+        test "$(task arguments "$homedDoc")" = 'provision-eventlog --channel-size 128MiB --account "user"'
+        test "$(task arguments "$namedDoc")" = 'provision-eventlog --channel-size 128MiB --account "Caleb Stewart" --account "guest"'
         # The same one command line, so the install-time run happens again
         # when an account is added.
         test "$(eventlog command "$namedDoc")" = "$(eventlog command)"

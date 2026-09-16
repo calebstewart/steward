@@ -112,7 +112,7 @@ separators in it.
 | --- | --- |
 | `%APPDATA%\steward\units\` | Your units: `*.service`, `*.target`, `*.timer`. |
 | `%LOCALAPPDATA%\steward\steward.log` | The manager's own log, always a file; set aside as `steward.log.1` past 8 MiB. |
-| Event Log channel `Steward/<your SID>` | Each unit's output and steward's lines about it, one event per line, where the install gave you a channel: 64 MiB for all of your units unless the install says otherwise (`services.steward.eventlog.channelSize`), oldest overwritten. Readable by you, administrators and SYSTEM. Read by `stewctl logs`, Event Viewer or `Get-WinEvent`. |
+| Event Log channel `Steward/<your SID>` | Each unit's output and steward's lines about it, one event per line, where the install gave you a channel: 128 MiB for all of your units unless the install says otherwise (`services.steward.eventlog.channelSize`), oldest overwritten. A ceiling, not a reservation: the file grows to it and stops. Readable by you, administrators and SYSTEM. Read by `stewctl logs`, Event Viewer or `Get-WinEvent`. |
 | `%LOCALAPPDATA%\steward\logs\<unit>.log` | The same, for a unit that says `StandardOutput=file`, on a machine without the channels, or for a run whose `steward-cat` could not start or kept dying; set aside as `<unit>.log.1` past 8 MiB, at a start or during the run. |
 | `%LOCALAPPDATA%\steward\state-<session>.json` | The session's processes, units at rest, active targets and timer schedules. Removed once a stop of everything completes. |
 | `%LOCALAPPDATA%\steward\timers\<unit>` | When a `Persistent=` timer last elapsed. Per user, so it survives sign-out. |

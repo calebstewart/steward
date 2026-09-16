@@ -258,11 +258,29 @@ tab the fields. `Get-WinEvent`'s own `Message` property is the one place the
 line does not appear — it reads "Cannot retrieve event message text." — so
 read the event's `Properties` there, or use `wevtutil qe /f:text`, which
 prints the line as the description. What a channel holds is bounded
-by its size, 64 MiB unless the install chose otherwise
+by its size, 128 MiB unless the install chose otherwise
 (`services.steward.eventlog.channelSize`, or `--channel-size` on the task),
-which is roughly 50,000 short lines for all of your units together, or
-about 28,000 lines of a daemon like komorebi, whose lines are longer; there
+which is roughly 100,000 short lines for all of your units together, or
+about 56,000 lines of a daemon like komorebi, whose lines are longer; there
 is no `.log.1`.
+
+All of your units share that budget, so one that writes far more than the
+rest ages out their history. To see whether one does, count a channel by
+unit:
+
+```powershell
+Get-WinEvent -ErrorAction SilentlyContinue `
+  -LogName Steward/$([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) |
+  Group-Object { $_.Properties[0].Value } | Sort-Object Count -Descending
+```
+
+The first property of every record is its unit. `-ErrorAction
+SilentlyContinue` is for the missing message file above, which `Get-WinEvent`
+complains about once per record and which does not stop it reading them.
+
+If one unit dominates and it is not the one whose history you want, give it
+`StandardOutput=file`: it goes back to `<unit>.log`, with 8 MiB and one
+generation of its own, and stops evicting the rest.
 
 Until your channel exists, `logs` says so and exits 1. The manager asks the
 provisioning task to create it as soon as it starts a unit and finds it
