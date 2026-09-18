@@ -656,10 +656,24 @@ settle unless `--no-block`), `is-active`, `daemon-reload`, and
   is reloaded, or restarted if it has no `ExecReload=`. A difference only in
   NixOS's harmless `[Unit]` keys (`Description=`, `Documentation=`, ...) is
   taken at once and nothing more. Anything else, any other `X-` key
-  included, is a restart. `[Service] X-ReloadIfChanged=true` turns a restart
-  into a reload into the new definition, and `X-RestartIfChanged=false`
-  leaves the unit running as it was, marked changed; `X-SwitchMethod=` is
-  not read.
+  included, is a restart.
+
+  How a unit is switched is read from its new file, as sd-switch reads it.
+  home-manager's `[Unit] X-SwitchMethod=` comes first: `reload` turns a
+  restart into a reload into the new definition (or a restart, with no
+  `ExecReload=`), `keep-old` leaves the unit running as it was, marked
+  changed, and `restart` and `stop-start` restart it. The last two are one
+  here: sd-switch's `stop-start` stops the unit before the new files are
+  loaded, with its old `ExecStop=`, and a restart in steward always stops
+  with the definition the unit was started with. A value sd-switch does not
+  know is a warning and ignored (sd-switch refuses the unit). Without a
+  method, the older flags: `X-ReloadIfChanged=true` is `reload` and
+  `X-RestartIfChanged=false` is `keep-old`, from `[Unit]`, where sd-switch
+  reads them, or else `[Service]`, where NixOS does. A change that asks only
+  for a reload is a reload whatever the method, as in sd-switch; the method
+  only decides whether a unit with no `ExecReload=` may be restarted
+  instead. `RefuseManualStart=`, which sd-switch takes to mean stop and do
+  not start, is not read.
 - **No `enable`/`disable`.** A unit is enabled by its `[Install] WantedBy=`;
   the unit files are declared (by Nix), so there is no second source of truth
   to keep. A unit is stopped for the session with `stop`, and for good by

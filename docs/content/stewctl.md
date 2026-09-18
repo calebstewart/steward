@@ -211,11 +211,33 @@ steward ignores still counts: a changed `X-Restart-Triggers=`, or any other
 `X-` key, restarts the unit. Removing `ExecReload=` or `X-Reload-Triggers=`
 alone changes nothing that runs.
 
-Two of home-manager's `[Service]` switch options are honoured, read from the
-new file: `X-ReloadIfChanged=true` makes a unit that would be restarted
-reload into its new definition instead, and `X-RestartIfChanged=false` leaves
-a changed unit running as it was started (still marked changed). The others,
-`X-SwitchMethod=` among them, are ordinary `X-` keys for now.
+A unit can say how it is to be switched, as sd-switch reads it, in the new
+file. home-manager's `[Unit] X-SwitchMethod=` decides what becomes of a
+running unit that would be restarted:
+
+- `restart`: it is restarted (the default);
+- `stop-start`: it is restarted, the same as `restart`;
+- `reload`: it reloads into its new definition, or is restarted if it has
+  no `ExecReload=`;
+- `keep-old`: it is left running as it was started, still marked changed.
+
+`stop-start` is sd-switch's way of stopping a unit with its old `ExecStop=`
+before the new files are loaded, where its `restart` would stop it with the
+new one. steward always does the former: a restart stops the unit with the
+definition it was started with, then starts it with the new one. Any other
+value is ignored, with a warning when the unit is read.
+
+Without `X-SwitchMethod=`, the older flags are read, from `[Unit]` as
+sd-switch reads them or from `[Service]` as NixOS does (`[Unit]` wins when
+both are set). `X-ReloadIfChanged=true` is `reload`, and
+`X-RestartIfChanged=false` is `keep-old`. `X-SwitchMethod=` outranks them.
+
+A change that asks only for a reload (`ExecReload=` or `X-Reload-Triggers=`)
+reloads a unit that has `ExecReload=` whatever the method, as in sd-switch.
+The method only decides whether a unit without `ExecReload=` is restarted
+instead: under `keep-old` or `X-RestartIfChanged=false` it is left running.
+`RefuseManualStart=`, which sd-switch takes to mean stopping a changed unit
+without starting it, is not read.
 
 A unit you stopped on purpose stays stopped, since `switch` runs after every
 apply that changes a unit, and an apply is no reason to undo a stop.

@@ -39,7 +39,7 @@ use std::fmt;
 use std::time::Duration;
 
 use crate::calendar::parse_calendar;
-use crate::compare::Entries;
+use crate::compare::{Entries, SwitchMethod};
 use crate::syntax::{self, Entry, UnitFile};
 use crate::time::parse_timespan;
 use crate::timer::{Timer, Trigger};
@@ -401,6 +401,15 @@ impl Reader {
             "PartOf" => list(&mut s.part_of, &e.value),
             "StartLimitBurst" => self.number(e, &mut s.start_limit_burst),
             "StartLimitIntervalSec" => self.span(e, &mut s.start_limit_interval),
+            // Read by switch from the entries; sd-switch refuses a unit whose
+            // value it does not know, and steward says it will not use it.
+            "X-SwitchMethod" if SwitchMethod::parse(&e.value).is_none() => self.warn(
+                e.line,
+                format!(
+                    "X-SwitchMethod={} is not reload, restart, stop-start or keep-old; ignored",
+                    e.value
+                ),
+            ),
             _ => self.unknown(e, "Unit"),
         }
     }
@@ -1065,6 +1074,27 @@ WantedBy=graphical-session.target
                 "line 6: warning: Nice= is not supported in [Service]; ignored",
                 "line 9: warning: section [Timer] is not supported; ignored",
             ]
+        );
+    }
+
+    #[test]
+    fn a_switch_method_steward_does_not_know_warns() {
+        let warnings = |value: &str| -> Vec<String> {
+            parse_service(
+                "t.service",
+                &format!("[Unit]\nX-SwitchMethod={value}\n[Service]\nExecStart=x.exe\n"),
+            )
+            .diagnostics
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+        };
+        for known in ["reload", "restart", "stop-start", "keep-old"] {
+            assert!(warnings(known).is_empty(), "{known}");
+        }
+        assert_eq!(
+            warnings("stop-only"),
+            ["line 2: warning: X-SwitchMethod=stop-only is not reload, restart, stop-start or keep-old; ignored"]
         );
     }
 
