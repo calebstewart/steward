@@ -940,12 +940,19 @@ build remaps them.
   night it missed, a sign-in timer due at once, a timer that stops once
   spent, a manager killed and replaced (every schedule kept, a missed elapse
   made up once), and timers edited and switched without a restart.
-- **M6** (done) -- output to the Event Log: a channel per user created by a
-  task at logon (#24), the `steward-cat` shim (#25), the manager's wiring
-  (#26), `stewctl logs` on the channel (#27), and the verification that made
-  the channel the default (#28). Exercised on the machine: the first
+- **M6** (done; two cases in #28 unverified) -- output to the Event Log: a
+  channel per user created by a task at logon (#24), the `steward-cat` shim
+  (#25), the manager's wiring (#26), `stewctl logs` on the channel (#27), the
+  verification that made the channel the default (#28), channels for the
+  accounts a configuration names (#41), a replacement shim when one dies
+  (#42), and 128 MiB channels (#43). Exercised on the machine: the first
   sign-in path, re-imports while a unit wrote, throughput, a manager killed
-  and handed over mid-write, and programs on a pipe against a file.
+  and handed over mid-write, programs on a pipe against a file, a shim killed
+  under each of three writers, and Event Viewer's own rendering. Two things
+  the machine could not show, because it has one account: a second real
+  account's first sign-in, and a sign-out while the provisioning task runs.
+  Both are reasoned in "Why the channel is the default" and neither is
+  measured, which is what #28 is still open for.
 - **Later** -- event triggers.
 
 ## Open questions
