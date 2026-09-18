@@ -107,11 +107,11 @@
         "winget-pkgs": "winget-pkgs"
       },
       "locked": {
-        "lastModified": 1789416574,
-        "narHash": "sha256-cSpOICmpFl3nWzpeonHkA952x+SplxeWs94LCg7nREI=",
+        "lastModified": 1789679808,
+        "narHash": "sha256-bUYNcPGV/iOnC7xr0XHbKrqo1PdFBbu9lMRt5fZJVYA=",
         "owner": "calebstewart",
         "repo": "winpkgs",
-        "rev": "39693d3bcc7a532f2d242db6b8de55feda2dc75a",
+        "rev": "e5e06b2a1d4c37421233d2df5a5c0fb9f07f9400",
         "type": "github"
       },
       "original": {
