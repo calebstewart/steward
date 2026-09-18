@@ -1207,7 +1207,7 @@ impl Manager {
         let now = Instant::now();
         for slot in 0..self.units.len() {
             let unit = &self.units[slot];
-            if !unit.machine.deadline().is_some_and(|d| now >= d) {
+            if unit.machine.deadline().is_none_or(|d| now < d) {
                 continue;
             }
             // Nothing comes back while everything is being stopped.

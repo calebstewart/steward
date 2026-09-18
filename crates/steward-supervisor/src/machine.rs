@@ -303,7 +303,7 @@ impl Machine {
             SpawnFailed(process) | Exited(process, _) => self.set_alive(process, false),
             JobEmpty => self.job_empty = true,
             Crashed(code) => self.crashed = Some(code),
-            Deadline if !self.deadline.is_some_and(|d| now >= d) => return,
+            Deadline if self.deadline.is_none_or(|d| now < d) => return,
             _ => {}
         }
 

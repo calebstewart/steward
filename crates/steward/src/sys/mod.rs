@@ -1,14 +1,15 @@
-//! The Windows half of supervision: jobs, processes, the completion port the
-//! manager waits on, environments, asking programs to exit, Explorer's
-//! readiness, the local clock timers keep, and -- for the Event Log
-//! provisioning rather than for supervision -- who is signed in and what an
-//! account name is called in SIDs. Each module is a thin, safe wrapper over
-//! the Win32 calls it names.
+//! The Windows half of supervision: jobs, processes, what can be told about
+//! a pipe from one end of it, the completion port the manager waits on,
+//! environments, asking programs to exit, Explorer's readiness, the local
+//! clock timers keep, and -- for the Event Log provisioning rather than for
+//! supervision -- who is signed in and what an account name is called in
+//! SIDs. Each module is a thin, safe wrapper over the Win32 calls it names.
 
 pub mod account;
 pub mod clock;
 pub mod env;
 pub mod job;
+pub mod pipe;
 pub mod port;
 pub mod process;
 pub mod session;

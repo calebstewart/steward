@@ -16,7 +16,9 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, GENERIC_READ, HANDLE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, FILETIME, GENERIC_READ, HANDLE,
+};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
@@ -24,13 +26,14 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess, GetProcessTimes,
-    InitializeProcThreadAttributeList, OpenProcess, RegisterWaitForSingleObject, TerminateProcess,
-    UnregisterWaitEx, UpdateProcThreadAttribute, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT,
-    DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE,
-    PROCESS_TERMINATE, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, WT_EXECUTEONLYONCE,
+    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
+    GetProcessTimes, InitializeProcThreadAttributeList, OpenProcess, RegisterWaitForSingleObject,
+    TerminateProcess, UnregisterWaitEx, UpdateProcThreadAttribute, CREATE_NO_WINDOW,
+    CREATE_UNICODE_ENVIRONMENT, DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_ACCESS_RIGHTS, PROCESS_DUP_HANDLE, PROCESS_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, WT_EXECUTEONLYONCE,
 };
 
 use super::job::Job;
@@ -65,10 +68,31 @@ impl Child {
     /// process.
     pub fn open(pid: u32, created: u64) -> io::Result<Child> {
         // SET_QUOTA and TERMINATE are what joining a job takes.
-        let access = PROCESS_SYNCHRONIZE
-            | PROCESS_QUERY_LIMITED_INFORMATION
-            | PROCESS_TERMINATE
-            | PROCESS_SET_QUOTA;
+        Child::open_with(
+            pid,
+            created,
+            PROCESS_SYNCHRONIZE
+                | PROCESS_QUERY_LIMITED_INFORMATION
+                | PROCESS_TERMINATE
+                | PROCESS_SET_QUOTA,
+        )
+    }
+
+    /// Re-open the `steward-cat` a previous manager started, with the right
+    /// to take copies of the handles it holds ([`Child::duplicate`]).
+    ///
+    /// Less than [`Child::open`] asks for, and deliberately: a shim joins no
+    /// job and nothing terminates it, so the two rights that would only make
+    /// the open likelier to be refused are left out.
+    pub fn open_shim(pid: u32, created: u64) -> io::Result<Child> {
+        Child::open_with(
+            pid,
+            created,
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_DUP_HANDLE,
+        )
+    }
+
+    fn open_with(pid: u32, created: u64, access: PROCESS_ACCESS_RIGHTS) -> io::Result<Child> {
         let handle = unsafe { owned(OpenProcess(access, 0, pid))? };
         let actual = creation_time(handle.as_raw_handle())?;
         if actual != created {
@@ -82,6 +106,39 @@ impl Child {
             created,
             handle,
         })
+    }
+
+    /// A copy, in this process, of handle number `value` in the child.
+    ///
+    /// The number means something across the two processes because the
+    /// child inherited the handle: an inherited handle keeps its value,
+    /// which is what lets the manager name a pipe's read ends on the shim's
+    /// own command line, and what lets a later manager find them again.
+    /// Whether the number still names the same thing is another question,
+    /// and [`super::pipe`] answers it.
+    ///
+    /// The copy is inheritable, as the pipe ends this is for already are:
+    /// it may be handed to a replacement `steward-cat`, and
+    /// `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` takes only inheritable handles.
+    /// It is inherited by nothing it is not listed for, since every spawn
+    /// here gives that list.
+    ///
+    /// Takes `PROCESS_DUP_HANDLE` on the child ([`Child::open_shim`]).
+    pub fn duplicate(&self, value: u64) -> io::Result<OwnedHandle> {
+        let mut copy: HANDLE = null_mut();
+        check(unsafe {
+            DuplicateHandle(
+                self.raw(),
+                value as usize as HANDLE,
+                GetCurrentProcess(),
+                &mut copy,
+                0,
+                1,
+                DUPLICATE_SAME_ACCESS,
+            )
+        })?;
+        // SAFETY: a handle DuplicateHandle opened for this process.
+        unsafe { owned(copy) }
     }
 }
 

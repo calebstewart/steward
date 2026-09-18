@@ -77,7 +77,9 @@ session.
   can crash — and `stewctl logs` works with no manager at all. If a shim dies
   while its unit is still running, the manager starts another on the same
   pipes, within milliseconds and without the unit's writes ever failing; only
-  the line the dead one was in the middle of is lost. After five replacements
+  the line the dead one was in the middle of is lost. A manager that adopted
+  the unit does this too: the pipes it needs are the previous manager's, and
+  it takes them back out of the shim itself. After five replacements
   in a minute it stops and sends that unit's output to its log file. Where the
   machine has no channel for you, or a unit says `StandardOutput=file`,
   output goes straight to the unit's log file through an inherited handle.

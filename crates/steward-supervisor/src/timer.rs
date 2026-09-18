@@ -258,7 +258,7 @@ mod tests {
 
         /// Elapse now, if due, and run the unit for `runs`.
         fn elapse(&mut self, runs: Duration) -> bool {
-            if !self.next_time().is_some_and(|t| t <= self.now) {
+            if self.next_time().is_none_or(|t| t > self.now) {
                 return false;
             }
             self.schedule.fire(&self.timer, "t.timer", self.now, 0);

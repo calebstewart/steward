@@ -164,7 +164,11 @@ template, but both had the default).
    rewritten whenever a job's membership changes. A restarted manager opens
    the recorded processes that are still the same processes, and still in its
    session, and puts them in a new job, which Windows nests inside the
-   orphaned one; it adopts them instead of starting duplicates.
+   orphaned one; it adopts them instead of starting duplicates. The same
+   record carries the unit's `steward-cat` -- its PID and creation time, and
+   the handle number and pipe name of each of its two read ends -- which is
+   how the new manager takes those read ends back out of it (*The Event
+   Log*, below).
 
    The first design named the jobs and re-opened them by name. That does not
    work: a job's name goes with its last handle, even while its processes run
@@ -396,6 +400,44 @@ shims' events, at warning level, naming both: that is where the gap is, and
 neither shim can say how many bytes it was, so no `Dropped` event claims a
 number it would have to invent.
 
+A manager that adopts a unit from one that crashed or handed over does not
+have those copies -- the read ends were the other manager's and went with it
+-- so it takes them back out of the shim. The shim is re-opened by PID and
+creation time with `PROCESS_DUP_HANDLE`, both of them the same user's, and
+each read end is duplicated out of it by the number it was inherited with:
+an inherited handle keeps its value, which is why the number can be written
+on the shim's own command line in the first place, and why a manager can
+record it. A number alone is not enough, since the shim may have closed that
+handle and opened something else, and `GetFileType` says only "a pipe". So
+the manager that made the pipes also records what each one is called --
+`NtQueryObject(ObjectNameInformation)` on a Win32 anonymous pipe returns the
+`\Device\NamedPipe\Win32Pipes.<process>.<counter>` it was secretly created
+with -- and the manager that takes it back compares that before it hands the
+handle to anything. All of it is best-effort: a shim that has gone, a number
+that does not check out, a refused `PROCESS_DUP_HANDLE` or a pipe that could
+not be named leaves the unit adopted as it was before any of this, with
+nothing to replace its shim.
+
+The write ends are not recovered and are not needed. The unit's own
+processes hold them, which is what keeps the pipes open; a replacement
+reader needs only the read ends. What the new manager starts for the unit
+next still gets pipes and a shim of its own, and that is where its hold on
+the old one ends. The recovered shim also changes nothing about the
+manager's own marks: those are events from the manager's own registration of
+the provider and never went through a shim, so an adopted unit's marks go to
+the channel before its first spawn exactly as they did.
+
+One thing follows from holding read ends without a write end: the shim
+exiting is no longer proof that something went wrong. The manager that made
+the pipes holds a write end, so a pipe of its own is never out of writers
+while it is watching; a manager that recovered one has no such guarantee, and
+its unit's ordinary end -- the last process exits, the shim reads to the end
+and stops -- would otherwise look like a death worth replacing, and the
+replacement would find the pipe broken and stop too. So before replacing, the
+manager asks whether either pipe still has a writer, which `PeekNamedPipe`
+answers from a read end without reading a byte: no writer on either means the
+output ended, and there is nothing to replace.
+
 The price is that until the replacement reads, the unit's writes wait rather
 than fail: a pipe with 64 KiB in it and nothing draining blocks its writer.
 So the manager gives up after **five replacements inside a minute**, closes
@@ -491,8 +533,8 @@ What it costs, and what to keep an eye on:
   is known, is `StandardOutput=file` on that one, which gives it back its
   own 8 MiB and a generation, or a larger `channelSize` to buy every unit
   more.
-- **A dead shim costs a line, not the unit** -- since #42, and only while a
-  manager that made the pipes is there. A file never breaks; a pipe whose
+- **A dead shim costs a line, not the unit** -- since #42, and since #48
+  under a manager that adopted the unit as well. A file never breaks; a pipe whose
   reader has gone does, and when the shim was killed under #28's three
   writers Node exited, the Rust program's writes failed and Windows
   PowerShell carried on with its output lost. The manager now starts a
@@ -509,18 +551,20 @@ What it costs, and what to keep an eye on:
   Past five replacements in a minute the manager gives up, which was
   measured too: the sixth death sent the unit to its file and its next
   `println!` panicked, and after a quiet 70 s the allowance came back.
-- **A manager that did not make the pipes cannot protect the shim.** The
-  read ends the replacement needs are the crashed or handed-over manager's,
-  and they go with it, so until the unit's next run its shim is as exposed
-  as it was before #42. A new manager could get one back: measured on
-  2026-09-15, a non-elevated program of the same user opened a live
-  `steward-cat` with `PROCESS_DUP_HANDLE`, duplicated both read ends by the
-  numbers on the shim's own command line, and -- with the manager and the
-  shim then both killed -- read the unit's output (lines 160 to 224) through
-  the duplicate. What is missing is a check that the number still names that
-  pipe rather than whatever the shim opened later, which `GetFileType` does
-  not give; the manager would also have to save the numbers with the shim's
-  PID. Not done: #48.
+- **A manager that did not make the pipes takes the read ends back** --
+  #48. The mechanism was measured on 2026-09-15, before it was built: a
+  non-elevated program of the same user opened a live `steward-cat` with
+  `PROCESS_DUP_HANDLE`, duplicated both read ends by the numbers on the
+  shim's own command line, and -- with the manager and the shim then both
+  killed -- read the unit's output (lines 160 to 224) through the duplicate.
+  What that left open was the check that a number still names the same pipe,
+  which is what the recorded object name is for. **Not yet measured on a
+  machine**: that a Win32 anonymous pipe's read end returns a name at all,
+  and that `PeekNamedPipe` on a recovered read end says `ERROR_BROKEN_PIPE`
+  where it should. Both fail safe if they turn out otherwise -- a pipe that
+  cannot be named is never offered to the next manager, and a `PeekNamedPipe`
+  that fails some other way is read as "there is still a writer", which is
+  what a manager did before it could ask -- but neither has been seen work.
 - **Loss past about 100,000 lines a second is silent**, as #25 found: ETW
   drops, `EventWrite` still succeeds, and no line can mark the gap the way
   the file's set-aside line does.

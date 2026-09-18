@@ -165,6 +165,40 @@ pub struct SavedUnit {
     /// manager's status says so too, rather than claiming the channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_fallback: Option<String>,
+    /// The `steward-cat` carrying this run's output, and where its two read
+    /// ends are: what the next manager needs to take them back out of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shim: Option<SavedShim>,
+}
+
+/// The `steward-cat` reading a unit's two pipes, written so that a manager
+/// that did not make those pipes can find their read ends again and go on
+/// replacing the shim if it dies.
+///
+/// Absent for a unit whose output goes to its file, and for one whose pipes
+/// could not be named -- the name is the whole check, and without it a
+/// handle number is not worth acting on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedShim {
+    pub pid: u32,
+    /// Creation time (FILETIME), as for a [`SavedProcess`]: a reused PID is
+    /// not the same shim.
+    pub created: u64,
+    pub stdout: SavedPipe,
+    pub stderr: SavedPipe,
+}
+
+/// One of a shim's two read ends, as the shim holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedPipe {
+    /// The handle's number in the shim: what it was inherited with, and
+    /// what is on the shim's own command line.
+    pub handle: u64,
+    /// What the pipe was called when the manager made it
+    /// (`\Device\NamedPipe\Win32Pipes.<process>.<counter>`). A number the
+    /// shim closed and opened again names whatever it opened, so the next
+    /// manager compares this before it hands the handle to anything.
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,17 +290,37 @@ mod tests {
                     },
                 ],
                 output_fallback: None,
+                shim: None,
             },
         );
         save(&file, &saved).unwrap();
         assert_eq!(load(&file).unwrap(), saved);
-        // A state from before fallbacks were recorded still loads, and one
-        // that records a fallback keeps it.
+        // A state from before fallbacks and shims were recorded still loads,
+        // and one that records either keeps it.
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(!text.contains("output_fallback"), "{text}");
+        assert!(!text.contains("shim"), "{text}");
         saved.units.get_mut("whkd.service").unwrap().output_fallback =
             Some("steward-cat.exe does not exist".into());
         save(&file, &saved).unwrap();
+        assert_eq!(load(&file).unwrap(), saved);
+        let unit = saved.units.get_mut("whkd.service").unwrap();
+        unit.output_fallback = None;
+        unit.shim = Some(SavedShim {
+            pid: 51,
+            created: 11,
+            stdout: SavedPipe {
+                handle: 0x1f8,
+                name: r"\Device\NamedPipe\Win32Pipes.0000000000000fa8.00000003".into(),
+            },
+            stderr: SavedPipe {
+                handle: 0x200,
+                name: r"\Device\NamedPipe\Win32Pipes.0000000000000fa8.00000004".into(),
+            },
+        });
+        save(&file, &saved).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(r#""handle": 504"#), "{text}");
         assert_eq!(load(&file).unwrap(), saved);
         // A state from before targets were saved still loads.
         std::fs::write(&file, r#"{"units":{}}"#).unwrap();
