@@ -68,6 +68,7 @@ let
               "komorebi.service"
             ];
             X-Restart-Triggers = [ trigger ];
+            X-SwitchMethod = "keep-old";
           };
           Service = {
             ExecStart = ''"C:\Program Files\whkd\bin\whkd.exe"'';
@@ -129,7 +130,7 @@ let
   };
 
   # home-manager's rendering: sections and keys in order, a list as repeated
-  # keys, the trigger as its hash.
+  # keys, the trigger as its hash, the switch method as written.
   expectedUnit = pkgs.writeText "whkd.service" ''
     [Install]
     WantedBy=graphical-session.target
@@ -144,6 +145,7 @@ let
     After=komorebi.service
     Description=Hotkey daemon
     X-Restart-Triggers=${builtins.hashString "sha256" (builtins.toJSON [ trigger ])}
+    X-SwitchMethod=keep-old
   '';
 in
 {

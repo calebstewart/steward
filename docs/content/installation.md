@@ -129,9 +129,12 @@ paths too, so they are written as their hash: a changed trigger still changes
 the file. `switch` compares the files key by key, as NixOS does, so a changed
 `X-Restart-Triggers=` restarts the unit, and a changed `X-Reload-Triggers=`
 reloads it through its `ExecReload=` — or restarts it, if it has none. A
-change only to `Description=` or `Documentation=` restarts nothing. Of
-home-manager's switch options, `X-ReloadIfChanged=` and `X-RestartIfChanged=`
-are honoured; see [stewctl switch](@/stewctl.md#switch). Sockets, paths,
+change only to `Description=` or `Documentation=` restarts nothing. A unit's
+`Unit.X-SwitchMethod` is honoured as sd-switch honours it: `reload` reloads
+the unit where it would restart, `keep-old` leaves it running as it was, and
+`restart` and `stop-start` both restart it. So are the older
+`X-ReloadIfChanged=` and `X-RestartIfChanged=`, in `Unit` or `Service`; see
+[stewctl switch](@/stewctl.md#switch). Sockets, paths,
 slices and mounts are not steward's, and the module warns about any it is
 given.
 

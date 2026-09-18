@@ -55,13 +55,50 @@ impl Entries {
         entries
     }
 
+    /// A key's last value; `None` if it is not there.
+    pub fn value(&self, section: &str, key: &str) -> Option<&str> {
+        self.0.get(section)?.get(key)?.last().map(String::as_str)
+    }
+
     /// A key's last value read as a systemd boolean; `None` if it is not
     /// there or is not a boolean.
     pub fn flag(&self, section: &str, key: &str) -> Option<bool> {
-        let value = self.0.get(section)?.get(key)?.last()?;
-        match value.to_ascii_lowercase().as_str() {
+        match self.value(section, key)?.to_ascii_lowercase().as_str() {
             "1" | "yes" | "y" | "true" | "t" | "on" => Some(true),
             "0" | "no" | "n" | "false" | "f" | "off" => Some(false),
+            _ => None,
+        }
+    }
+
+    /// home-manager's `[Unit] X-SwitchMethod=`; `None` if it is not there or
+    /// is not one of its values.
+    pub fn switch_method(&self) -> Option<SwitchMethod> {
+        SwitchMethod::parse(self.value("Unit", "X-SwitchMethod")?)
+    }
+}
+
+/// How a changed unit is to be switched to its new definition, as
+/// home-manager's `[Unit] X-SwitchMethod=` has it, and sd-switch reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchMethod {
+    Reload,
+    Restart,
+    /// sd-switch stops the unit before the new definitions are loaded, so
+    /// with its old `ExecStop=`, and starts it after; its restart stops it
+    /// with the new one.
+    StopStart,
+    /// Leave it running as it is.
+    KeepOld,
+}
+
+impl SwitchMethod {
+    /// One of sd-switch's values, spelled as it spells them.
+    pub fn parse(value: &str) -> Option<SwitchMethod> {
+        match value {
+            "reload" => Some(SwitchMethod::Reload),
+            "restart" => Some(SwitchMethod::Restart),
+            "stop-start" => Some(SwitchMethod::StopStart),
+            "keep-old" => Some(SwitchMethod::KeepOld),
             _ => None,
         }
     }
@@ -256,5 +293,34 @@ mod tests {
         assert_eq!(e.flag("Service", "X-Odd"), None);
         assert_eq!(e.flag("Service", "X-Missing"), None);
         assert_eq!(e.flag("Unit", "X-ReloadIfChanged"), None);
+    }
+
+    #[test]
+    fn the_switch_method_is_sd_switch_s_spelling_and_the_last_one_counts() {
+        let method = |text: &str| entries(&format!("{BASE}[Unit]\n{text}")).switch_method();
+        assert_eq!(
+            method("X-SwitchMethod=keep-old\nX-SwitchMethod=reload\n"),
+            Some(SwitchMethod::Reload)
+        );
+        assert_eq!(
+            method("X-SwitchMethod=restart\n"),
+            Some(SwitchMethod::Restart)
+        );
+        assert_eq!(
+            method("X-SwitchMethod=stop-start\n"),
+            Some(SwitchMethod::StopStart)
+        );
+        assert_eq!(
+            method("X-SwitchMethod=keep-old\n"),
+            Some(SwitchMethod::KeepOld)
+        );
+        assert_eq!(method("X-SwitchMethod=Reload\n"), None);
+        assert_eq!(method("X-SwitchMethod=stop-only\n"), None);
+        assert_eq!(method(""), None);
+        // In [Unit] only.
+        assert_eq!(
+            entries(&format!("{BASE}X-SwitchMethod=reload\n")).switch_method(),
+            None
+        );
     }
 }

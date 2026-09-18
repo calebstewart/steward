@@ -40,7 +40,7 @@ use steward_supervisor::{
     Action, Decision, Event as UnitEvent, Machine, Moments, Outcome, Plan, Process, Progress,
     Schedule, State,
 };
-use steward_unit::compare::{compare, Change};
+use steward_unit::compare::{compare, Change, SwitchMethod};
 use steward_unit::{Command, KillMode, Service};
 use windows_sys::core::BOOL;
 use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
@@ -867,8 +867,8 @@ impl Manager {
         match how {
             Apply::Nothing => Vec::new(),
             Apply::Restart => self.restart(slot),
-            Apply::Keep => vec![format!(
-                "{name}: not restarted (X-RestartIfChanged=false); it runs as it was started"
+            Apply::Keep(option) => vec![format!(
+                "{name}: not restarted ({option}); it runs as it was started"
             )],
             Apply::RestartToReload => {
                 let mut messages = vec![format!("{name}: no ExecReload= to reload it with")];
@@ -877,7 +877,8 @@ impl Manager {
             }
             Apply::Reload => {
                 // Into the new definition, whatever changed in it, if it is
-                // one that reloads rather than restarts (X-ReloadIfChanged=).
+                // one that reloads rather than restarts (X-SwitchMethod=reload,
+                // X-ReloadIfChanged=).
                 let next = unit.machine.next_service().clone();
                 unit.machine.replace_in_place(next);
                 match unit.why_not_reloadable() {
@@ -2501,27 +2502,50 @@ enum Apply {
     /// A reload, but there is no `ExecReload=` to reload it with: what it
     /// was reloaded for is taken up by a restart instead.
     RestartToReload,
-    /// `X-RestartIfChanged=false`: it runs on as it was started.
-    Keep,
+    /// It is not to be restarted, as the option named says: it runs on as
+    /// it was started.
+    Keep(&'static str),
 }
 
 /// How `switch` applies a `change` to a running unit, going to the
-/// definition `next`: as the change asks, save that home-manager's
-/// `X-ReloadIfChanged=true` makes a restart a reload, and
+/// definition `next`: as the change asks, save as the new file says
+/// otherwise -- as sd-switch reads it, or NixOS's switch.
+///
+/// `[Unit] X-SwitchMethod=` comes first, as in sd-switch: `reload` makes a
+/// restart a reload, `keep-old` leaves the unit be, and `restart` and
+/// `stop-start` restart it, which are the same here since a restart stops
+/// the unit with the definition it was started with. Without it, the older
+/// flags: `X-ReloadIfChanged=true` makes a restart a reload, and
 /// `X-RestartIfChanged=false` leaves the unit be rather than restart it --
-/// each read from the new file, as NixOS's switch reads them.
+/// each from `[Unit]`, where sd-switch reads them, or else from `[Service]`,
+/// where NixOS does. (sd-switch's `X-StopIfChanged=false` restarts without
+/// the stop first, which is what steward does anyway.)
+///
+/// A change that asks only for a reload is a reload whatever the method, as
+/// in sd-switch; what the method decides is whether a unit with no
+/// `ExecReload=` may be restarted instead.
 fn how_to_apply(change: Change, next: &Service) -> Apply {
+    let entries = &next.entries;
+    let flag = |key| entries.flag("Unit", key).or(entries.flag("Service", key));
+    let (reload_asked, keep) = match entries.switch_method() {
+        Some(SwitchMethod::Reload) => (true, None),
+        Some(SwitchMethod::Restart | SwitchMethod::StopStart) => (false, None),
+        Some(SwitchMethod::KeepOld) => (false, Some("X-SwitchMethod=keep-old")),
+        None => (
+            flag("X-ReloadIfChanged") == Some(true),
+            (flag("X-RestartIfChanged") == Some(false)).then_some("X-RestartIfChanged=false"),
+        ),
+    };
     let reload = match change {
         Change::Nothing => return Apply::Nothing,
         Change::Reload => true,
-        Change::Restart => next.entries.flag("Service", "X-ReloadIfChanged") == Some(true),
+        Change::Restart => reload_asked,
     };
-    let restarts = next.entries.flag("Service", "X-RestartIfChanged") != Some(false);
-    match (reload, next.exec_reload.is_empty(), restarts) {
+    match (reload, next.exec_reload.is_empty(), keep) {
         (true, false, _) => Apply::Reload,
-        (_, _, false) => Apply::Keep,
-        (true, true, true) => Apply::RestartToReload,
-        (false, _, true) => Apply::Restart,
+        (_, _, Some(option)) => Apply::Keep(option),
+        (true, true, None) => Apply::RestartToReload,
+        (false, _, None) => Apply::Restart,
     }
 }
 
@@ -2688,7 +2712,10 @@ mod tests {
         );
         // ...unless it is not to be restarted.
         let keep = |value: &str| format!("{}X-RestartIfChanged=false\n", trigger(PLAIN, value));
-        assert_eq!(switch(&keep("aaa"), &keep("bbb")), Apply::Keep);
+        assert_eq!(
+            switch(&keep("aaa"), &keep("bbb")),
+            Apply::Keep("X-RestartIfChanged=false")
+        );
     }
 
     #[test]
@@ -2714,7 +2741,7 @@ mod tests {
         );
         assert_eq!(
             switch(PLAIN, &with(PLAIN, "X-RestartIfChanged=no\n")),
-            Apply::Keep
+            Apply::Keep("X-RestartIfChanged=false")
         );
         // A reload asked for is a reload, restart or no.
         assert_eq!(
@@ -2725,6 +2752,142 @@ mod tests {
             Apply::Reload
         );
         assert_eq!(how_to_apply(Change::Nothing, &unit(PLAIN)), Apply::Nothing);
+    }
+
+    /// What a new file's `[Unit] X-SwitchMethod=` makes of a change that
+    /// would restart the unit.
+    fn by_method(base: &str, method: &str) -> Apply {
+        let new = format!("[Unit]\nX-SwitchMethod={method}\n{base}ExecStart=\nExecStart=new.exe\n");
+        switch(base, &new)
+    }
+
+    #[test]
+    fn home_manager_s_switch_method() {
+        assert_eq!(by_method(RELOADS, "reload"), Apply::Reload);
+        assert_eq!(by_method(PLAIN, "reload"), Apply::RestartToReload);
+        assert_eq!(by_method(RELOADS, "restart"), Apply::Restart);
+        // A restart stops the unit with its old definition already.
+        assert_eq!(by_method(RELOADS, "stop-start"), Apply::Restart);
+        assert_eq!(
+            by_method(RELOADS, "keep-old"),
+            Apply::Keep("X-SwitchMethod=keep-old")
+        );
+        // One it does not know is no method at all.
+        assert_eq!(by_method(RELOADS, "stop-only"), Apply::Restart);
+        assert_eq!(by_method(RELOADS, "Reload"), Apply::Restart);
+    }
+
+    /// As in sd-switch, the method outranks the older flags, whichever
+    /// section they are in.
+    #[test]
+    fn the_switch_method_outranks_the_flags() {
+        let flags = "[Unit]\nX-ReloadIfChanged=true\nX-RestartIfChanged=false\n";
+        assert_eq!(
+            by_method(&format!("{flags}{RELOADS}"), "restart"),
+            Apply::Restart
+        );
+        assert_eq!(
+            by_method(&format!("{RELOADS}X-RestartIfChanged=false\n"), "reload"),
+            Apply::Reload
+        );
+        assert_eq!(
+            by_method(&format!("{RELOADS}X-ReloadIfChanged=true\n"), "keep-old"),
+            Apply::Keep("X-SwitchMethod=keep-old")
+        );
+        // A method it does not know leaves the flags to decide.
+        assert_eq!(
+            by_method(&format!("{RELOADS}X-ReloadIfChanged=true\n"), "stop-only"),
+            Apply::Reload
+        );
+    }
+
+    /// sd-switch reads the older flags from `[Unit]`, NixOS from
+    /// `[Service]`: either will do, and `[Unit]` wins.
+    #[test]
+    fn the_flags_are_read_from_either_section() {
+        let new = |unit: &str, service: &str| {
+            format!("[Unit]\n{unit}{RELOADS}ExecStart=\nExecStart=new.exe\n{service}")
+        };
+        assert_eq!(
+            switch(RELOADS, &new("X-ReloadIfChanged=true\n", "")),
+            Apply::Reload
+        );
+        assert_eq!(
+            switch(RELOADS, &new("X-RestartIfChanged=false\n", "")),
+            Apply::Keep("X-RestartIfChanged=false")
+        );
+        assert_eq!(
+            switch(
+                RELOADS,
+                &new("X-RestartIfChanged=true\n", "X-RestartIfChanged=false\n")
+            ),
+            Apply::Restart
+        );
+        assert_eq!(
+            switch(
+                RELOADS,
+                &new("X-ReloadIfChanged=false\n", "X-ReloadIfChanged=true\n")
+            ),
+            Apply::Restart
+        );
+        // Not a boolean in [Unit]: [Service] decides.
+        assert_eq!(
+            switch(
+                RELOADS,
+                &new("X-ReloadIfChanged=maybe\n", "X-ReloadIfChanged=true\n")
+            ),
+            Apply::Reload
+        );
+    }
+
+    /// A change that asks only for a reload reloads whatever the method, as
+    /// in sd-switch; without `ExecReload=`, the method says whether it may
+    /// restart instead.
+    #[test]
+    fn a_reload_is_a_reload_whatever_the_method() {
+        let trigger = |base: &str, method: &str, value: &str| {
+            format!("[Unit]\nX-SwitchMethod={method}\nX-Reload-Triggers={value}\n{base}")
+        };
+        for method in ["reload", "restart", "stop-start", "keep-old"] {
+            assert_eq!(
+                switch(
+                    &trigger(RELOADS, method, "aaa"),
+                    &trigger(RELOADS, method, "bbb")
+                ),
+                Apply::Reload,
+                "{method}"
+            );
+        }
+        for method in ["reload", "restart", "stop-start"] {
+            assert_eq!(
+                switch(
+                    &trigger(PLAIN, method, "aaa"),
+                    &trigger(PLAIN, method, "bbb")
+                ),
+                Apply::RestartToReload,
+                "{method}"
+            );
+        }
+        assert_eq!(
+            switch(
+                &trigger(PLAIN, "keep-old", "aaa"),
+                &trigger(PLAIN, "keep-old", "bbb")
+            ),
+            Apply::Keep("X-SwitchMethod=keep-old")
+        );
+    }
+
+    /// The method is read from the new file, and changing it is a change
+    /// like any other `X-` key: a restart, taken as the new method says.
+    #[test]
+    fn the_method_is_the_new_file_s() {
+        let with = |method: &str| format!("[Unit]\nX-SwitchMethod={method}\n{RELOADS}");
+        assert_eq!(switch(&with("keep-old"), &with("restart")), Apply::Restart);
+        assert_eq!(
+            switch(&with("restart"), &with("keep-old")),
+            Apply::Keep("X-SwitchMethod=keep-old")
+        );
+        assert_eq!(switch(RELOADS, &with("reload")), Apply::Reload);
     }
 
     /// Each quoted form reads back as the argument: checked against what
