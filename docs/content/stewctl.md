@@ -17,6 +17,9 @@ timer is named in full.
 | [`start UNIT...`](#start-stop-restart) | Start units, and what they want or require. |
 | [`stop UNIT...`](#start-stop-restart) | Stop units, until started again or the next sign-in. |
 | [`restart UNIT...`](#start-stop-restart) | Stop and start units; a changed unit starts with its new definition. |
+| [`reload UNIT...`](#reload) | Run units' `ExecReload=` while they keep running. |
+| [`reload-or-restart UNIT...`](#reload) | Reload the units that can be; restart the rest. |
+| [`try-reload-or-restart UNIT...`](#reload) | The same, leaving units at rest alone. |
 | [`is-active UNIT...`](#is-active) | Exit 0 if every unit is active, 3 otherwise. |
 | [`switch`](#switch) | Read the unit files and make what runs match them. |
 | [`daemon-reload`](#daemon-reload) | Read the unit files, and only take note. |
@@ -41,13 +44,16 @@ whkd.service        active*           9876         0  Hotkey daemon
 ```
 
 A `*` after the state marks a unit whose file has changed since it started:
-it is still running its old definition.
+it is still running its old definition — or, where the change was only in
+what reloads it, it has the new one and is waiting for a reload (`status`
+says which).
 
 ### States
 
 | State | |
 | --- | --- |
 | `active` | Running; for a target or a timer, started. |
+| `reload` | Running, and running `ExecReload=`: still up, and counted as active. |
 | `inactive` | At rest: never started, stopped, or — for `Type=oneshot` — run to completion. |
 | `failed` | Ended badly with no restart to come: its policy said no, or its start limit ran out. It stays down until started again. |
 | `auto-restart` | Waiting out the delay before an automatic restart. |
@@ -98,7 +104,8 @@ With units, each in detail, then the last ten lines of its log:
 -- 2026-09-13 14:29:55.422 steward: exited with code 3; restarting in 11.7 s (restart 4)
 ```
 
-`Main PID` and `Processes` appear while it runs; a timer shows its next
+`Main PID` and `Processes` appear while it runs, and `Reload` once it has been
+reloaded since it started, saying how the last reload went; a timer shows its next
 `Trigger`, what it `Triggers`, and when it `Last` elapsed. A service's
 `Output` line says where its output goes, your Event Log channel or its log
 file, and the ten lines come from there, read as [`logs`](#logs) reads them.
@@ -135,10 +142,43 @@ whkd.service: active
 They exit 1 if any unit ended anywhere but `active`, or finished cleanly as a
 oneshot does. `--no-block` returns as soon as the manager has the request.
 
+## reload
+
+```console
+stewctl reload notes-sync
+stewctl reload-or-restart notes-sync whkd
+stewctl try-reload-or-restart notes-sync whkd
+```
+
+**`reload`** runs each unit's `ExecReload=` while it keeps running — see
+[Reloading](@/units.md#reloading). Every unit named must be an active service
+with `ExecReload=`; if one is not, nothing is reloaded and `reload` says why.
+Not to be confused with [`daemon-reload`](#daemon-reload), which reloads the
+unit *files*.
+
+**`reload-or-restart`** reloads the units that can be reloaded, and restarts
+the rest — starting those that are not running. **`try-reload-or-restart`**
+does the same but leaves the units at rest alone.
+
+All three wait, as `restart` does, then say how each ended:
+
+```console
+> stewctl reload notes-sync
+notes-sync.service: reloading
+notes-sync.service: reloaded
+> stewctl reload other
+other.service: reloading
+other.service: reload failed: its command exited with code 3; still active; see stewctl status other.service
+```
+
+They exit 1 if a reload failed or timed out (after `TimeoutStartSec=`); the
+unit stays up either way. `--no-block` returns at once.
+
 ## is-active
 
 Prints each unit's state, one per line, and exits 0 if every one of them is
-`active` and 3 otherwise, as `systemctl is-active` does — for scripts.
+`active` (or `reload`, which is active too) and 3 otherwise, as
+`systemctl is-active` does — for scripts.
 
 ## switch
 
@@ -153,8 +193,29 @@ Reads the unit files and makes what runs match them, as home-manager's
 - a **changed** unit that is running is restarted with its new definition —
   except a target or a timer, which takes its new definition at once without
   one;
+- a running unit changed only in `[Service] ExecReload=` or in
+  home-manager's `[Unit] X-Reload-Triggers=` takes its new definition at once
+  and is **reloaded**, or restarted if it has no `ExecReload=` to reload it
+  with;
+- a unit changed only in keys that describe it — `Description=`,
+  `Documentation=`, and the rest of NixOS's list (`OnFailure=`,
+  `RefuseManualStop=`, ...) — takes its new definition at once, and is left
+  running;
 - of the units at rest, what is **new** starts: a new unit, one a target now
-  wants that it did not, or a `failed` one whose definition changed.
+  wants that it did not, or a `failed` one whose definition (or reload
+  trigger) changed.
+
+What changed is read from the file as written, key by key, as NixOS's
+`switch-to-configuration` does — not from what steward makes of it. So a key
+steward ignores still counts: a changed `X-Restart-Triggers=`, or any other
+`X-` key, restarts the unit. Removing `ExecReload=` or `X-Reload-Triggers=`
+alone changes nothing that runs.
+
+Two of home-manager's `[Service]` switch options are honoured, read from the
+new file: `X-ReloadIfChanged=true` makes a unit that would be restarted
+reload into its new definition instead, and `X-RestartIfChanged=false` leaves
+a changed unit running as it was started (still marked changed). The others,
+`X-SwitchMethod=` among them, are ordinary `X-` keys for now.
 
 A unit you stopped on purpose stays stopped, since `switch` runs after every
 apply that changes a unit, and an apply is no reason to undo a stop.
@@ -165,10 +226,14 @@ module](@/installation.md#the-home-module) runs.
 
 ## daemon-reload
 
-Also `reload`. Reads the unit files again, and only takes note: a removed unit
-is stopped, a new one is loaded but not started, and a changed one keeps
-running as it was started — its old `ExecStop=` included — marked changed until
-it is restarted. `switch` afterwards applies what `daemon-reload` noted.
+Reads the unit files again, and only takes note: a removed unit is stopped, a
+new one is loaded but not started, and a changed one keeps running as it was
+started — its old `ExecStop=` included — marked changed until it is
+restarted. One changed only in what reloads it takes its new definition at
+once, marked until it is reloaded. `switch` afterwards applies what
+`daemon-reload` noted.
+
+It used to be `reload` as well; `reload` now reloads units, as in systemctl.
 
 ## logs
 

@@ -126,8 +126,14 @@ reads the files as they are.
 
 home-manager's `X-Restart-Triggers=` and `X-Reload-Triggers=` name store
 paths too, so they are written as their hash: a changed trigger still changes
-the file, and `switch` still restarts the unit. Sockets, paths, slices and
-mounts are not steward's, and the module warns about any it is given.
+the file. `switch` compares the files key by key, as NixOS does, so a changed
+`X-Restart-Triggers=` restarts the unit, and a changed `X-Reload-Triggers=`
+reloads it through its `ExecReload=` — or restarts it, if it has none. A
+change only to `Description=` or `Documentation=` restarts nothing. Of
+home-manager's switch options, `X-ReloadIfChanged=` and `X-RestartIfChanged=`
+are honoured; see [stewctl switch](@/stewctl.md#switch). Sockets, paths,
+slices and mounts are not steward's, and the module warns about any it is
+given.
 
 ## By hand
 

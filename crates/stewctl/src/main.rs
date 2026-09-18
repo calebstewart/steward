@@ -91,18 +91,44 @@ enum Command {
         #[arg(long)]
         no_block: bool,
     },
+    /// Run units' ExecReload= while they keep running, so they take their
+    /// configuration again. Each must be active and have ExecReload=.
+    Reload {
+        #[arg(required = true)]
+        units: Vec<String>,
+        /// Return at once instead of waiting for the reloads to finish.
+        #[arg(long)]
+        no_block: bool,
+    },
+    /// Reload the units that can be reloaded; restart the rest (starting
+    /// those not running).
+    ReloadOrRestart {
+        #[arg(required = true)]
+        units: Vec<String>,
+        #[arg(long)]
+        no_block: bool,
+    },
+    /// Reload the units that can be reloaded; restart the rest, if they are
+    /// running.
+    TryReloadOrRestart {
+        #[arg(required = true)]
+        units: Vec<String>,
+        #[arg(long)]
+        no_block: bool,
+    },
     /// Exit 0 if every unit is active, 3 otherwise; print their states.
     IsActive {
         #[arg(required = true)]
         units: Vec<String>,
     },
     /// Read the unit files again. Removed units are stopped; changed units
-    /// keep running as they are until restarted.
-    #[command(visible_alias = "reload")]
+    /// keep running as they are until restarted (or, changed only in what
+    /// reloads them, until reloaded).
     DaemonReload,
     /// Read the unit files again and make what runs match them, as sd-switch
-    /// does: restart the changed, start the new, stop the removed; a unit
-    /// stopped on purpose stays stopped. What an apply runs.
+    /// does: restart the changed, reload those changed only in what reloads
+    /// them, start the new, stop the removed; a unit stopped on purpose stays
+    /// stopped. What an apply runs.
     Switch {
         /// Succeed, doing nothing, when no manager runs in this session:
         /// the next one to start reads the units as they are.
@@ -134,6 +160,26 @@ fn main() -> ExitCode {
             units: names(units),
         }),
         Command::Restart { units, no_block } => restart(names(units), no_block),
+        Command::Reload { units, no_block } => reload(
+            Request::ReloadUnits {
+                units: names(units),
+            },
+            no_block,
+        ),
+        Command::ReloadOrRestart { units, no_block } => reload(
+            Request::ReloadOrRestart {
+                units: names(units),
+                only_running: false,
+            },
+            no_block,
+        ),
+        Command::TryReloadOrRestart { units, no_block } => reload(
+            Request::ReloadOrRestart {
+                units: names(units),
+                only_running: true,
+            },
+            no_block,
+        ),
         Command::IsActive { units } => is_active(names(units)),
         Command::DaemonReload => simple(Request::Reload { apply: false }),
         Command::Switch { if_running } => switch(if_running),
@@ -228,7 +274,7 @@ fn list() -> Outcome {
         "UNIT", "STATE", "PID", "RESTARTS"
     );
     for unit in &response.units {
-        let state = if unit.changed {
+        let state = if unit.changed || unit.reload_due {
             format!("{}*", unit.state)
         } else {
             unit.state.clone()
@@ -246,6 +292,8 @@ fn list() -> Outcome {
     }
     if response.units.iter().any(|u| u.changed) {
         println!("\n* changed on disk; restart it (or `stewctl switch`) to use the new definition");
+    } else if response.units.iter().any(|u| u.reload_due) {
+        println!("\n* changed on disk; reload it (or `stewctl switch`) to apply the change");
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -434,7 +482,7 @@ fn channel_reader(unit: &str) -> Result<eventlog::Reader, String> {
 
 fn print_unit(unit: &UnitStatus) {
     let mark = match unit.state.as_str() {
-        "active" => "●",
+        "active" | "reload" => "●",
         "failed" => "×",
         _ => "○",
     };
@@ -447,6 +495,8 @@ fn print_unit(unit: &UnitStatus) {
         unit.path,
         if unit.changed {
             " (changed on disk since it started)"
+        } else if unit.reload_due {
+            " (changed on disk; a reload applies it)"
         } else {
             ""
         }
@@ -484,6 +534,11 @@ fn print_unit(unit: &UnitStatus) {
         Some(outcome) => println!("   Restarts: {} (last ended: it {outcome})", unit.restarts),
         None => println!("   Restarts: {}", unit.restarts),
     }
+    match unit.last_reload.as_deref() {
+        Some("exited cleanly") => println!("     Reload: the last one succeeded"),
+        Some(why) => println!("     Reload: the last one failed: its command {why}"),
+        None => {}
+    }
     if !unit.wanted_by.is_empty() {
         println!("  Wanted by: {}", unit.wanted_by.join(" "));
     }
@@ -499,23 +554,42 @@ fn print_unit(unit: &UnitStatus) {
     }
 }
 
-/// Wait until none of `units` is on its way up; report where each ended.
-fn wait_until_settled(units: &[String]) -> Outcome {
+/// Wait until none of `units` is on its way up, or, after a `reload`, in the
+/// middle of one; report where each ended, and how a reload did.
+fn wait_until_settled(units: &[String], reload: bool) -> Outcome {
     let give_up = Instant::now() + Duration::from_secs(90);
     loop {
         std::thread::sleep(Duration::from_millis(200));
         let response = ask(Request::Status {
             units: units.to_vec(),
         })?;
-        let settled = response
-            .units
-            .iter()
-            .all(|u| !u.is_starting() && u.state != "stop" && !u.state.starts_with("stop-"));
+        let settled = response.units.iter().all(|u| {
+            !u.is_starting()
+                && u.state != "stop"
+                && !u.state.starts_with("stop-")
+                && !(reload && u.state == "reload")
+        });
         if settled || Instant::now() > give_up {
             let mut code = ExitCode::SUCCESS;
             for unit in &response.units {
+                // A unit restarted rather than reloaded has no reload to
+                // speak of: a start forgets the last one.
+                let reloaded = unit.last_reload.as_deref().filter(|_| reload);
                 match unit.state.as_str() {
-                    "active" => println!("{}: active", unit.name),
+                    "active" => match reloaded {
+                        None => println!("{}: active", unit.name),
+                        Some("exited cleanly") => println!("{}: reloaded", unit.name),
+                        Some(why) => {
+                            println!(
+                                "{}: reload failed: its command {why}; still active; see \
+                                 stewctl status {}",
+                                unit.name, unit.name
+                            );
+                            code = ExitCode::FAILURE;
+                        }
+                    },
+                    // Up, and being reloaded by someone else.
+                    "reload" if !reload => println!("{}: active", unit.name),
                     "inactive" if unit.last_outcome.as_deref() == Some("exited cleanly") => {
                         println!("{}: ran and exited cleanly", unit.name)
                     }
@@ -549,7 +623,7 @@ fn start(units: Vec<String>, no_block: bool) -> Outcome {
     if no_block {
         return Ok(ExitCode::SUCCESS);
     }
-    wait_until_settled(&units)
+    wait_until_settled(&units, false)
 }
 
 fn restart(units: Vec<String>, no_block: bool) -> Outcome {
@@ -563,7 +637,43 @@ fn restart(units: Vec<String>, no_block: bool) -> Outcome {
     if no_block {
         return Ok(ExitCode::SUCCESS);
     }
-    wait_until_settled(&units)
+    wait_until_settled(&units, false)
+}
+
+/// `reload`, `reload-or-restart` or `try-reload-or-restart`: ask, and wait
+/// for the reloads -- and the restarts -- to be done.
+fn reload(request: Request, no_block: bool) -> Outcome {
+    let (Request::ReloadUnits { units } | Request::ReloadOrRestart { units, .. }) = &request else {
+        return Err("not a reload".into());
+    };
+    let mut waited = units.clone();
+    // What try-reload-or-restart leaves alone, being at rest, is not waited
+    // for, nor reported as not up.
+    if matches!(
+        request,
+        Request::ReloadOrRestart {
+            only_running: true,
+            ..
+        }
+    ) && !no_block
+    {
+        let at_rest: BTreeSet<String> = ask(Request::Status {
+            units: waited.clone(),
+        })?
+        .units
+        .into_iter()
+        .filter(|u| matches!(u.state.as_str(), "inactive" | "failed" | "auto-restart"))
+        .map(|u| u.name)
+        .collect();
+        waited.retain(|u| !at_rest.contains(u));
+    }
+    for message in ask(request)?.messages {
+        println!("{message}");
+    }
+    if no_block || waited.is_empty() {
+        return Ok(ExitCode::SUCCESS);
+    }
+    wait_until_settled(&waited, true)
 }
 
 fn is_active(units: Vec<String>) -> Outcome {

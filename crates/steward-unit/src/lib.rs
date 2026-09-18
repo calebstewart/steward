@@ -3,8 +3,10 @@
 //! [`syntax`] is the file format alone; [`parse_service`] gives the keys their
 //! meaning and reports everything it could not use. [`load_dir`] reads a unit
 //! directory. [`calendar`] is `OnCalendar=`'s events, and when they come.
+//! [`compare`] says what a changed file asks of a unit that runs.
 
 pub mod calendar;
+pub mod compare;
 mod service;
 pub mod syntax;
 pub mod time;

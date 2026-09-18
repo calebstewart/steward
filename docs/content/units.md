@@ -43,9 +43,9 @@ removing its file.
 - A key that takes one value takes its last one. A key that takes a list —
   `After=`, `Wants=`, `Environment=`, `ExecStartPre=` and the like —
   accumulates across repeats, and an empty assignment (`After=`) resets it.
-- Sections and keys starting with `X-` are ignored silently, as systemd does.
-  Anything else steward does not know is a warning, and the rest of the unit
-  still loads.
+- Sections and keys starting with `X-` are ignored silently, as systemd does
+  — though `switch` still notices when one changes. Anything else steward
+  does not know is a warning, and the rest of the unit still loads.
 
 > [!WARNING]
 > The continuation rule is systemd's, and so is its trap on Windows: a value
@@ -101,11 +101,12 @@ covered with examples on the [Targets](@/targets.md#how-units-relate) page.
 | `ExecStart=` | *required* | The command line to run. Exactly one, except for `Type=oneshot`, which runs each in turn. |
 | `ExecStartPre=`, `ExecStartPost=` | none | Commands run in turn before the main process starts, and after it is up. A failure fails the start, unless the command is prefixed with `-`. |
 | `ExecStop=` | none | Commands run in turn to stop the service, before anything else is tried. See [Stopping](#stopping). |
+| `ExecReload=` | none | Commands run in turn to have the running service take its configuration again, without a restart. See [Reloading](#reloading). |
 | `Restart=` | `on-failure` | When an ending nobody asked for is followed by a restart — see [Restarting](#restarting). systemd's default is `no`. |
 | `RestartSec=` | `1s` | The delay before the first automatic restart. |
 | `RestartSteps=` | `5` | Restarts it takes for the delay to grow from `RestartSec=` to `RestartMaxDelaySec=`. `0` turns the backoff off. |
 | `RestartMaxDelaySec=` | `1min` | The longest the delay grows to. |
-| `TimeoutStartSec=` | `30s` | How long the whole start may take — `ExecStartPre=`, the main process, `ExecStartPost=` — before it has failed. |
+| `TimeoutStartSec=` | `30s` | How long the whole start may take — `ExecStartPre=`, the main process, `ExecStartPost=` — before it has failed. A reload gets as long, as in systemd. |
 | `TimeoutStopSec=` | `10s` | How long a stop may take before the job is terminated. |
 | `TimeoutSec=` | | Sets both of the above. |
 | `WorkingDirectory=` | `%USERPROFILE%` | The directory each command starts in. As written: `%` is not expanded here either. |
@@ -118,7 +119,13 @@ wait a minute and a half. Any time can be `infinity`.
 
 Each start gets an environment built afresh from your account, as a new
 Explorer window would, rather than a copy of the manager's — so a `PATH`
-changed after sign-in reaches every service started after the change.
+changed after sign-in reaches every service started after the change. A
+command run beside the main process — `ExecStartPost=`, `ExecReload=`,
+`ExecStop=` — also gets `MAINPID`, the main process's ID, when steward knows
+it: not once a `Type=forking` service's launcher has exited, and not for a
+unit taken over from an earlier manager whose main process was already gone.
+As with any variable, a command reads it through `cmd.exe /d /c ...
+%MAINPID%` or its own code.
 
 ### Types
 
@@ -221,6 +228,36 @@ ignores it, and is terminated at the timeout.
 
 A service's own crash ends it at once: every job is set to die on an unhandled
 exception rather than wait on an error-reporting dialog nobody will see.
+
+## Reloading
+
+A service that can take new configuration while it runs says how in
+`ExecReload=`: `stewctl reload` runs each command in turn, in the service's
+job, and the main process carries on. On Linux the command is usually
+`kill -HUP $MAINPID`; Windows has no signal to send, so a reload is whatever
+the program provides — a `--reload` flag, a command-line client, a message to
+its window found through `MAINPID`.
+
+```ini
+[Service]
+ExecStart=notes-sync.exe --watch
+ExecReload=notes-sync.exe --reload-config
+ExecReload=-cmd.exe /d /c echo reloaded %MAINPID%
+```
+
+A reload is not a start. The unit stays `active` throughout (its state reads
+`reload` while the commands run); it waits for nothing it is ordered after,
+and counts toward no restart or start limit. A command that fails, unless it
+is prefixed with `-`, ends the reload there: the failure is reported — in the
+unit's log, in `stewctl status`, and by `stewctl reload` exiting 1 — and the
+service stays up as it was. So does a reload that outlasts
+`TimeoutStartSec=`: its command is terminated. A stop cuts a reload short,
+terminating its command before `ExecStop=`.
+
+Only an active service with `ExecReload=` can be reloaded; `stewctl reload`
+refuses anything else. `switch` reloads a unit whose file changed only in
+`ExecReload=` or in home-manager's `X-Reload-Triggers=` — see
+[stewctl switch](@/stewctl.md#switch).
 
 ## Time spans
 

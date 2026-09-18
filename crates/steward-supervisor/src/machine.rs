@@ -2,6 +2,14 @@
 //! `ExecStartPost=`), running, ending -- asked to or not -- and what follows:
 //! a restart after a delay, `failed`, or rest.
 //!
+//! A running service can also be reloaded: its `ExecReload=` commands run one
+//! after another, in its job, while the main process carries on, and then it
+//! is simply active again. A reload is not a start. It waits for nothing it
+//! is ordered after, counts toward no start limit or restart, and a command
+//! that fails fails the reload, not the service: the failure is what
+//! [`Machine::last_reload`] says, and the service stays up. A stop cuts a
+//! reload short, as it does a start.
+//!
 //! The machine is pure. It is fed [`Event`]s and answers with [`Action`]s;
 //! starting processes, managing the job and keeping time are the caller's
 //! business. The caller's side of the contract:
@@ -40,6 +48,8 @@ pub enum State {
     /// The main process is up; running `ExecStartPost=` number n.
     StartPost(usize),
     Active,
+    /// Active, and running `ExecReload=` number n.
+    Reloading(usize),
     /// Running `ExecStop=` number n.
     StopExec(usize),
     /// The processes have been asked to exit.
@@ -58,6 +68,7 @@ impl State {
             State::Starting | State::Oneshot(_) => "start",
             State::StartPost(_) => "start-post",
             State::Active => "active",
+            State::Reloading(_) => "reload",
             State::StopExec(_) => "stop",
             State::StopAsked => "stop-asked",
             State::StopKilled => "stop-killed",
@@ -81,8 +92,8 @@ impl State {
 }
 
 /// Which of a service's processes an event is about. The main process is
-/// `ExecStart=`; a control process is `ExecStartPre=`, `ExecStartPost=` or
-/// `ExecStop=`.
+/// `ExecStart=`; a control process is `ExecStartPre=`, `ExecStartPost=`,
+/// `ExecReload=` or `ExecStop=`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Process {
     Main,
@@ -93,6 +104,9 @@ pub enum Process {
 pub enum Event {
     Start,
     Stop,
+    /// Run `ExecReload=`, if the service is active and has any. One asked
+    /// for while a reload runs follows it.
+    Reload,
     Spawned(Process),
     SpawnFailed(Process),
     Exited(Process, u32),
@@ -142,6 +156,12 @@ pub struct Machine {
     crashed: Option<u32>,
     ending: Option<Ending>,
     start_after_stop: bool,
+    /// When a reload in progress has run out of time.
+    reload_deadline: Option<Instant>,
+    /// Another reload was asked for while one ran.
+    reload_again: bool,
+    /// How the last reload of this run ended.
+    last_reload: Option<Outcome>,
     /// A definition waiting for the next start.
     pending: Option<Service>,
 }
@@ -165,6 +185,9 @@ impl Machine {
             crashed: None,
             ending: None,
             start_after_stop: false,
+            reload_deadline: None,
+            reload_again: false,
+            last_reload: None,
             pending: None,
         }
     }
@@ -185,6 +208,13 @@ impl Machine {
     /// Automatic restarts so far.
     pub fn restarts(&self) -> u32 {
         self.restarts
+    }
+
+    /// How the last reload since the service started ended: `Clean` if
+    /// every command did, or how the first that failed did. `None` if it has
+    /// not been reloaded, or a reload is running, or was cut short.
+    pub fn last_reload(&self) -> Option<Outcome> {
+        self.last_reload
     }
 
     /// When to feed `Deadline`.
@@ -208,6 +238,30 @@ impl Machine {
             self.pending = None;
         } else {
             self.pending = Some(service);
+        }
+    }
+
+    /// A new definition taken at once, running or not: one that differs in
+    /// nothing the running processes were started with -- only in what a
+    /// reload runs, or what describes the unit -- or one a service that
+    /// reloads rather than restarts is about to be reloaded into. A service
+    /// half-way through a start or a stop finishes it as it began: a
+    /// definition that would change its commands under it waits for the
+    /// next start, as [`Machine::replace`] has it.
+    pub fn replace_in_place(&mut self, service: Service) {
+        let midway = !matches!(
+            self.state,
+            State::Active
+                | State::Reloading(_)
+                | State::Inactive
+                | State::Failed
+                | State::AutoRestart
+        );
+        if midway && !runs_alike(&self.service, &service) {
+            self.pending = Some(service);
+        } else {
+            self.service = service;
+            self.pending = None;
         }
     }
 
@@ -310,6 +364,7 @@ impl Machine {
         match (self.state, event) {
             (_, Start) => self.request_start(now, out),
             (_, Stop) => self.request_stop(now, out),
+            (_, Reload) => self.request_reload(now, out),
 
             (StartPre(i), Exited(Control, code)) => self.after_pre(i, classify(code), now, out),
             (StartPre(i), SpawnFailed(Control)) => {
@@ -337,12 +392,23 @@ impl Machine {
             (StartPost(i), SpawnFailed(Control)) => {
                 self.after_post(i, Outcome::SpawnFailed, now, out)
             }
-            (StartPost(_) | Active, Exited(Main, code)) => {
+            (StartPost(_) | Active | Reloading(_), Exited(Main, code)) => {
                 self.end(false, classify(code), now, out)
             }
-            (Active, JobEmpty) if self.is_forking() => {
+            (Active | Reloading(_), JobEmpty) if self.is_forking() => {
                 let outcome = self.crashed.map_or(Outcome::Vanished, classify);
                 self.end(false, outcome, now, out);
+            }
+
+            (Reloading(i), Exited(Control, code)) => self.after_reload(i, classify(code), now, out),
+            (Reloading(i), SpawnFailed(Control)) => {
+                self.after_reload(i, Outcome::SpawnFailed, now, out)
+            }
+            (Reloading(_), Deadline) => {
+                // The command is terminated, and its exit, whenever it comes,
+                // finds the service active and changes nothing.
+                out.push(Action::KillControl);
+                self.reloaded(Outcome::Timeout, now, out);
             }
 
             (StopExec(i), Exited(Control, _) | SpawnFailed(Control)) => {
@@ -406,13 +472,21 @@ impl Machine {
 
     fn request_stop(&mut self, now: Instant, out: &mut Vec<Action>) {
         self.start_after_stop = false;
+        self.reload_again = false;
         match self.state {
             State::Inactive | State::Failed => {}
             State::AutoRestart => {
                 self.state = State::Inactive;
                 self.deadline = None;
             }
-            State::Active => {
+            State::Active | State::Reloading(_) => {
+                // A reload is cut short: its command is terminated, and the
+                // service stops as an active one does, ExecStop= and all.
+                // (A reload that timed out may have left its command dying,
+                // and terminating it again is harmless.)
+                if self.control {
+                    out.push(Action::KillControl);
+                }
                 self.ending = Some(Ending {
                     requested: true,
                     outcome: Outcome::Clean,
@@ -431,8 +505,60 @@ impl Machine {
         }
     }
 
+    /// A reload of an active service that has `ExecReload=`, or another
+    /// after the one that is running; anything else is not reloaded.
+    fn request_reload(&mut self, now: Instant, out: &mut Vec<Action>) {
+        match self.state {
+            State::Active if !self.service.exec_reload.is_empty() => {
+                self.last_reload = None;
+                self.reload_deadline = now.checked_add(self.service.timeout_start);
+                self.reload(0, now, out);
+            }
+            State::Reloading(_) => self.reload_again = true,
+            _ => {}
+        }
+    }
+
+    fn reload(&mut self, i: usize, now: Instant, out: &mut Vec<Action>) {
+        match self.service.exec_reload.get(i) {
+            Some(command) => {
+                self.state = State::Reloading(i);
+                self.deadline = self.reload_deadline;
+                out.push(Action::SpawnControl(command.clone()));
+            }
+            None => self.reloaded(Outcome::Clean, now, out),
+        }
+    }
+
+    fn after_reload(&mut self, i: usize, outcome: Outcome, now: Instant, out: &mut Vec<Action>) {
+        // `get`: a definition taken in place during the reload may have
+        // fewer commands than the one it began with.
+        let ignore = self
+            .service
+            .exec_reload
+            .get(i)
+            .is_some_and(|c| c.ignore_failure);
+        if outcome.is_clean() || ignore {
+            self.reload(i + 1, now, out);
+        } else {
+            self.reloaded(outcome, now, out);
+        }
+    }
+
+    /// The reload is over, well or not; the service is as active as it was.
+    fn reloaded(&mut self, outcome: Outcome, now: Instant, out: &mut Vec<Action>) {
+        self.state = State::Active;
+        self.deadline = None;
+        self.reload_deadline = None;
+        self.last_reload = Some(outcome);
+        if std::mem::take(&mut self.reload_again) {
+            self.request_reload(now, out);
+        }
+    }
+
     fn begin_start(&mut self, now: Instant, out: &mut Vec<Action>) {
         self.deadline = None;
+        self.last_reload = None;
         if let Some(service) = self.pending.take() {
             self.service = service;
         }
@@ -524,6 +650,7 @@ impl Machine {
     /// The service is ending, asked to or not: stop what is still running.
     fn end(&mut self, requested: bool, outcome: Outcome, now: Instant, out: &mut Vec<Action>) {
         self.ending = Some(Ending { requested, outcome });
+        self.reload_again = false;
         self.stop_deadline = now.checked_add(self.service.timeout_stop);
         if self.control {
             out.push(Action::KillControl);
@@ -591,6 +718,19 @@ impl Machine {
             self.state = State::Failed;
         }
     }
+}
+
+/// Whether two definitions start and stop the service alike: they differ, if
+/// at all, only in `ExecReload=` and in what describes the unit.
+fn runs_alike(a: &Service, b: &Service) -> bool {
+    let bare = |s: &Service| Service {
+        description: None,
+        documentation: Vec::new(),
+        exec_reload: Vec::new(),
+        entries: Default::default(),
+        ..s.clone()
+    };
+    bare(a) == bare(b)
 }
 
 #[cfg(test)]
@@ -1098,6 +1238,217 @@ mod tests {
             .unwrap();
         h.machine.replace(new);
         assert_eq!(h.machine.service().exec_start[0].line, "new.exe");
+    }
+
+    const RELOADS: &str = "ExecStart=app.exe\nExecReload=app.exe --reload\nExecReload=notify.exe\n";
+
+    #[test]
+    fn a_reload_runs_its_commands_in_order_and_leaves_the_service_active() {
+        let mut h = Harness::new(RELOADS);
+        h.feed(Start);
+        assert_eq!(h.feed(Reload), [SpawnControl(cmd("app.exe --reload"))]);
+        assert_eq!(h.state(), State::Reloading(0));
+        assert_eq!(h.machine.last_reload(), None);
+        assert_eq!(h.delay(), 30.0);
+        assert_eq!(
+            h.feed(Exited(Control, 0)),
+            [SpawnControl(cmd("notify.exe"))]
+        );
+        assert_eq!(h.state(), State::Reloading(1));
+        // Nothing is asked of the main process, throughout.
+        assert_eq!(h.feed(Exited(Control, 0)), []);
+        assert_eq!(h.state(), State::Active);
+        assert_eq!(h.machine.last_reload(), Some(Outcome::Clean));
+        assert_eq!(h.machine.deadline(), None);
+        // It is not a start: nothing counted, nothing ended.
+        assert_eq!(h.machine.restarts(), 0);
+        assert_eq!(h.machine.last_outcome(), None);
+    }
+
+    #[test]
+    fn a_reload_needs_an_active_service_with_exec_reload() {
+        let mut h = Harness::new("ExecStart=app.exe\n");
+        h.feed(Start);
+        assert_eq!(h.feed(Reload), []);
+        assert_eq!(h.state(), State::Active);
+        assert_eq!(h.machine.last_reload(), None);
+
+        let mut h = Harness::new(&format!("ExecStartPre=prep.exe\n{RELOADS}"));
+        assert_eq!(h.feed(Reload), []);
+        assert_eq!(h.state(), State::Inactive);
+        h.feed(Start);
+        assert_eq!(h.feed(Reload), []);
+        assert_eq!(h.state(), State::StartPre(0));
+
+        let mut t = target("[Unit]\n");
+        t.handle(Start, Instant::now());
+        assert_eq!(t.handle(Reload, Instant::now()), []);
+        assert_eq!(t.state(), State::Active);
+    }
+
+    /// A failed command fails the reload, not the service: the rest of the
+    /// commands are skipped, and the service stays up as it was.
+    #[test]
+    fn a_failed_reload_is_reported_and_the_service_stays_active() {
+        let mut h = Harness::new(RELOADS);
+        h.feed(Start);
+        h.feed(Reload);
+        assert_eq!(h.feed(Exited(Control, 3)), []);
+        assert_eq!(h.state(), State::Active);
+        assert_eq!(h.machine.last_reload(), Some(Outcome::ExitCode(3)));
+        assert_eq!(h.machine.last_outcome(), None);
+        // One that cannot be started at all fails it the same way.
+        assert_eq!(h.raw(Reload), [SpawnControl(cmd("app.exe --reload"))]);
+        assert_eq!(h.raw(SpawnFailed(Control)), []);
+        assert_eq!(h.state(), State::Active);
+        assert_eq!(h.machine.last_reload(), Some(Outcome::SpawnFailed));
+    }
+
+    #[test]
+    fn a_dash_lets_a_reload_command_fail() {
+        let mut h = Harness::new("ExecStart=app.exe\nExecReload=-try.exe\nExecReload=notify.exe\n");
+        h.feed(Start);
+        h.feed(Reload);
+        assert_eq!(
+            h.feed(Exited(Control, 1)),
+            [SpawnControl(cmd("notify.exe"))]
+        );
+        h.feed(Exited(Control, 0));
+        assert_eq!(h.machine.last_reload(), Some(Outcome::Clean));
+    }
+
+    #[test]
+    fn a_reload_that_hangs_times_out_after_timeout_start_sec() {
+        let mut h = Harness::new(&format!("{RELOADS}TimeoutStartSec=5s\n"));
+        h.feed(Start);
+        h.feed(Reload);
+        assert_eq!(h.delay(), 5.0);
+        assert_eq!(h.wait(4.9), []);
+        assert_eq!(h.until_deadline(), [KillControl]);
+        assert_eq!(h.state(), State::Active);
+        assert_eq!(h.machine.last_reload(), Some(Outcome::Timeout));
+        assert_eq!(h.machine.deadline(), None);
+        // The terminated command's exit, when it comes, changes nothing.
+        assert_eq!(h.feed(Exited(Control, 0x5354_5744)), []);
+        assert_eq!(h.state(), State::Active);
+        assert_eq!(h.machine.last_reload(), Some(Outcome::Timeout));
+    }
+
+    #[test]
+    fn a_reload_asked_for_during_one_follows_it() {
+        let mut h = Harness::new(RELOADS);
+        h.feed(Start);
+        h.feed(Reload);
+        assert_eq!(h.feed(Reload), []);
+        h.feed(Exited(Control, 0));
+        assert_eq!(
+            h.feed(Exited(Control, 0)),
+            [SpawnControl(cmd("app.exe --reload"))]
+        );
+        assert_eq!(h.state(), State::Reloading(0));
+        h.feed(Exited(Control, 0));
+        h.feed(Exited(Control, 0));
+        assert_eq!(h.state(), State::Active);
+    }
+
+    #[test]
+    fn a_stop_cuts_a_reload_short_and_runs_exec_stop() {
+        let mut h = Harness::new(&format!("{RELOADS}ExecStop=app.exe --quit\n"));
+        h.feed(Start);
+        h.feed(Reload);
+        assert_eq!(
+            h.feed(Stop),
+            [KillControl, SpawnControl(cmd("app.exe --quit"))]
+        );
+        assert_eq!(h.state(), State::StopExec(0));
+        assert_eq!(h.machine.last_reload(), None);
+        h.feed(JobEmpty);
+        h.feed(Exited(Main, 0));
+        h.feed(Exited(Control, 0));
+        assert_eq!(h.state(), State::Inactive);
+        assert_eq!(h.machine.last_outcome(), Some(Outcome::Clean));
+    }
+
+    #[test]
+    fn a_restart_during_a_reload_starts_again_once_stopped() {
+        let mut h = Harness::new(RELOADS);
+        h.feed(Start);
+        h.feed(Reload);
+        assert_eq!(h.feed(Stop), [KillControl, AskToExit]);
+        assert_eq!(h.feed(Start), []);
+        h.feed(Exited(Control, 0x5354_5744));
+        assert_eq!(h.main_exits(0), [SpawnMain(cmd("app.exe"))]);
+        assert_eq!(h.state(), State::Active);
+        assert_eq!(h.machine.last_reload(), None);
+    }
+
+    #[test]
+    fn a_crash_during_a_reload_ends_the_service_as_ever() {
+        let mut h = Harness::new(RELOADS);
+        h.feed(Start);
+        h.feed(Reload);
+        assert_eq!(h.feed(Exited(Main, CRASH)), [KillControl, AskToExit]);
+        h.feed(JobEmpty);
+        h.feed(Exited(Control, 0x5354_5744));
+        assert_eq!(h.state(), State::AutoRestart);
+        assert_eq!(h.machine.last_outcome(), Some(Outcome::Crashed(CRASH)));
+        // Its restart is a start, with no reload about it.
+        h.until_deadline();
+        assert_eq!(h.state(), State::Active);
+        assert_eq!(h.machine.last_reload(), None);
+    }
+
+    #[test]
+    fn a_forking_daemon_can_be_reloaded_and_vanish_during_it() {
+        let mut h =
+            Harness::new("Type=forking\nExecStart=launcher.exe\nExecReload=launcher.exe reload\n");
+        h.feed(Start);
+        h.feed(Exited(Main, 0));
+        assert_eq!(h.feed(Reload), [SpawnControl(cmd("launcher.exe reload"))]);
+        h.feed(Exited(Control, 0));
+        assert_eq!(h.state(), State::Active);
+        // The daemon goes while its reload command runs.
+        h.feed(Reload);
+        h.feed(JobEmpty);
+        assert_eq!(h.state(), State::StopAsked);
+        h.feed(Exited(Control, 0));
+        assert_eq!(h.state(), State::AutoRestart);
+        assert_eq!(h.machine.last_outcome(), Some(Outcome::Vanished));
+    }
+
+    fn service(section: &str) -> Service {
+        parse_service("t.service", &format!("[Service]\n{section}"))
+            .service
+            .unwrap()
+    }
+
+    /// What a reload needs is taken at once; a unit half-way through a start
+    /// or a stop takes what would change its commands at its next start.
+    #[test]
+    fn a_definition_taken_in_place() {
+        let mut h = Harness::new("ExecStart=app.exe\n");
+        h.feed(Start);
+        h.machine.replace_in_place(service(RELOADS));
+        assert!(!h.machine.is_changed());
+        assert_eq!(h.feed(Reload), [SpawnControl(cmd("app.exe --reload"))]);
+        // One that reloads rather than restarts takes even new commands.
+        h.machine
+            .replace_in_place(service("ExecStart=new.exe\nExecReload=app.exe --reload\n"));
+        assert!(!h.machine.is_changed());
+        assert_eq!(h.feed(Exited(Control, 0)), []);
+        assert_eq!(h.machine.last_reload(), Some(Outcome::Clean));
+
+        let mut h = Harness::new("ExecStartPre=prep.exe\nExecStart=app.exe\n");
+        h.feed(Start);
+        h.machine.replace_in_place(service(
+            "ExecStartPre=prep.exe\nExecStart=app.exe\nExecReload=r\n",
+        ));
+        assert!(!h.machine.is_changed());
+        assert_eq!(h.machine.service().exec_reload[0].line, "r");
+        h.machine
+            .replace_in_place(service("ExecStartPre=other.exe\nExecStart=app.exe\n"));
+        assert!(h.machine.is_changed());
+        assert_eq!(h.machine.service().exec_start_pre[0].line, "prep.exe");
     }
 
     #[test]
