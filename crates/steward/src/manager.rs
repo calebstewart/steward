@@ -40,6 +40,7 @@ use steward_supervisor::{
     Action, Decision, Event as UnitEvent, Machine, Moments, Outcome, Plan, Process, Progress,
     Schedule, State,
 };
+use steward_unit::compare::{compare, Change};
 use steward_unit::{Command, KillMode, Service};
 use windows_sys::core::BOOL;
 use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
@@ -200,6 +201,10 @@ struct Unit {
     /// for a unit adopted from another manager, whose pipes and
     /// shim were that manager's.
     output: Option<Output>,
+    /// Its file changed while it ran only in what a reload runs or is
+    /// triggered by: it took the new definition at once, and the next
+    /// `switch` reloads it. Until then, or until it stops or starts again.
+    reload_due: bool,
 }
 
 impl Unit {
@@ -220,6 +225,29 @@ impl Unit {
             left_at_rest: false,
             log_warned: false,
             output: None,
+            reload_due: false,
+        }
+    }
+
+    /// Why it cannot be reloaded now, if it cannot: only an active service
+    /// with `ExecReload=` can.
+    fn why_not_reloadable(&self) -> Option<String> {
+        let name = &self.name;
+        let service = self.machine.service();
+        let state = self.machine.state();
+        if service.is_target() {
+            Some(format!("{name} is a target, which runs nothing to reload"))
+        } else if service.is_timer() {
+            Some(format!("{name} is a timer, which runs nothing to reload"))
+        } else if service.exec_reload.is_empty() {
+            Some(format!("{name} has no ExecReload=, so cannot be reloaded"))
+        } else if !matches!(state, State::Active | State::Reloading(_)) {
+            Some(format!(
+                "{name} is not active ({}), so cannot be reloaded",
+                state.name()
+            ))
+        } else {
+            None
         }
     }
 
@@ -482,7 +510,9 @@ impl Manager {
             Request::Status { units }
             | Request::Start { units }
             | Request::Stop { units }
-            | Request::Restart { units } => units.clone(),
+            | Request::Restart { units }
+            | Request::ReloadUnits { units }
+            | Request::ReloadOrRestart { units, .. } => units.clone(),
             Request::Reload { .. } => Vec::new(),
         };
         let mut slots = Vec::new();
@@ -507,7 +537,12 @@ impl Manager {
                 };
             }
             Request::Reload { apply } => return self.reload(apply),
-            Request::Start { .. } | Request::Restart { .. } if self.exit.is_some() => {
+            Request::Start { .. }
+            | Request::Restart { .. }
+            | Request::ReloadUnits { .. }
+            | Request::ReloadOrRestart { .. }
+                if self.exit.is_some() =>
+            {
                 return Response::error("steward is shutting down");
             }
             Request::Start { units } => {
@@ -525,10 +560,47 @@ impl Manager {
                     messages.extend(self.restart(slot));
                 }
             }
+            // All or nothing, as for a unit that does not exist.
+            Request::ReloadUnits { .. } => {
+                if let Some(why) = slots
+                    .iter()
+                    .find_map(|&s| self.units[s].why_not_reloadable())
+                {
+                    return Response::error(why);
+                }
+                for slot in slots {
+                    messages.push(self.reload_unit(slot));
+                }
+            }
+            Request::ReloadOrRestart { only_running, .. } => {
+                for slot in slots {
+                    if self.units[slot].why_not_reloadable().is_none() {
+                        messages.push(self.reload_unit(slot));
+                    } else if only_running && self.units[slot].resting() {
+                        let name = &self.units[slot].name;
+                        messages.push(format!("{name}: not running; left alone"));
+                    } else {
+                        messages.extend(self.restart(slot));
+                    }
+                }
+            }
         }
         Response {
             messages,
             ..Response::default()
+        }
+    }
+
+    /// Reload a unit that can be: an active service with `ExecReload=`.
+    fn reload_unit(&mut self, slot: usize) -> String {
+        let name = self.units[slot].name.clone();
+        let again = matches!(self.units[slot].machine.state(), State::Reloading(_));
+        self.units[slot].reload_due = false;
+        self.feed(slot, UnitEvent::Reload);
+        if again {
+            format!("{name}: reloading again once the running reload is done")
+        } else {
+            format!("{name}: reloading")
         }
     }
 
@@ -610,7 +682,9 @@ impl Manager {
         }
         // A running unit restarts through its stop: the machine starts it
         // again once the stop is done, with its newest definition. (A target
-        // is stopped and started at once.)
+        // is stopped and started at once.) What a reload was due for, the
+        // start takes up.
+        self.units[slot].reload_due = false;
         self.feed(slot, UnitEvent::Stop);
         self.feed(slot, UnitEvent::Start);
         vec![format!("{name}: restarting")]
@@ -629,10 +703,17 @@ impl Manager {
     }
 
     /// Read the unit files again; with `apply`, make what runs match them, as
-    /// sd-switch does for home-manager: the changed that run restart, the
-    /// removed stop, and of those at rest only what is new starts -- a new
-    /// unit, one a target newly wants, or a failed one whose definition
-    /// changed. A unit stopped on purpose stays stopped.
+    /// sd-switch does for home-manager: the changed that run restart, or
+    /// reload, the removed stop, and of those at rest only what is new starts
+    /// -- a new unit, one a target newly wants, or a failed one whose
+    /// definition changed. A unit stopped on purpose stays stopped.
+    ///
+    /// What a change asks of a unit is read from its file as written
+    /// ([`compare`]): a change only in `X-Reload-Triggers=` or `ExecReload=`
+    /// is taken at once and reloads the unit, one only in how the unit is
+    /// described is taken at once and does nothing more, and anything else
+    /// -- `X-Restart-Triggers=` among it, which the parser skips -- waits
+    /// for the restart. [`how_to_apply`] has the rest.
     fn reload(&mut self, apply: bool) -> Response {
         let (services, mut messages) = match read_units() {
             Ok(read) => read,
@@ -659,21 +740,55 @@ impl Manager {
             self.feed(slot, UnitEvent::Stop);
         }
 
+        // Changed so that it restarts, were it running; changed only so that
+        // it reloads; new, or back.
         let mut changed = Vec::new();
+        let mut retriggered = Vec::new();
         let mut added = Vec::new();
         for (name, service) in std::mem::take(&mut fresh) {
             match self.slot(&name) {
                 Some(slot) => {
                     let unit = &mut self.units[slot];
                     let came_back = std::mem::take(&mut unit.removed);
-                    if came_back || *unit.machine.next_service() != service {
-                        unit.machine.replace(service);
-                        messages.push(format!("{name}: changed"));
-                        if came_back {
-                            added.push(name.clone());
-                        }
-                        changed.push(name);
+                    if !came_back && *unit.machine.next_service() == service {
+                        continue;
                     }
+                    let change = if came_back {
+                        Change::Restart
+                    } else {
+                        compare(&unit.machine.next_service().entries, &service.entries)
+                    };
+                    match change {
+                        // So is one already waiting to restart into a newer
+                        // definition, whatever this adds to it.
+                        _ if unit.machine.is_changed() => unit.machine.replace(service),
+                        Change::Restart => {
+                            unit.machine.replace(service);
+                            if came_back {
+                                added.push(name.clone());
+                            }
+                            changed.push(name.clone());
+                        }
+                        // What it runs is as it was: the new definition is
+                        // taken at once, and a running service -- not a
+                        // target or a timer, which run nothing to reload --
+                        // is reloaded into it by the next switch.
+                        Change::Reload => {
+                            unit.machine.replace_in_place(service);
+                            if !unit.resting() && !unit.machine.service().runs_nothing() {
+                                unit.reload_due = true;
+                            }
+                            retriggered.push(name.clone());
+                        }
+                        Change::Nothing => {
+                            unit.machine.replace_in_place(service);
+                            messages.push(format!(
+                                "{name}: changed, in nothing that needs a restart or a reload"
+                            ));
+                            continue;
+                        }
+                    }
+                    messages.push(format!("{name}: changed"));
                 }
                 None => {
                     messages.push(format!("{name}: new"));
@@ -703,8 +818,19 @@ impl Manager {
                 // definition at once too, and its next elapse follows it.
                 let unit = &self.units[slot];
                 if !unit.resting() && !unit.machine.service().runs_nothing() {
-                    messages.extend(self.restart(slot));
+                    let how = how_to_apply(Change::Restart, unit.machine.next_service());
+                    messages.extend(self.apply_change(slot, how));
                 }
+            }
+            // Due a reload from this reload or an earlier one: a restart
+            // above has seen to some of them already.
+            for slot in 0..self.units.len() {
+                let unit = &self.units[slot];
+                if unit.removed || !unit.reload_due {
+                    continue;
+                }
+                let how = how_to_apply(Change::Reload, unit.machine.service());
+                messages.extend(self.apply_change(slot, how));
             }
             for name in self.wanted() {
                 let Some(slot) = self.slot(&name) else {
@@ -712,8 +838,9 @@ impl Manager {
                 };
                 let start = match self.units[slot].machine.state() {
                     State::Inactive => added.contains(&name) || !wanted_before.contains(&name),
-                    // Tried again once its definition changes.
-                    State::Failed => changed.contains(&name),
+                    // Tried again once its definition changes, or what its
+                    // reload is triggered by does.
+                    State::Failed => changed.contains(&name) || retriggered.contains(&name),
                     _ => false,
                 };
                 if start {
@@ -729,6 +856,35 @@ impl Manager {
         Response {
             messages,
             ..Response::default()
+        }
+    }
+
+    /// What `switch` does to a running unit whose file changed.
+    fn apply_change(&mut self, slot: usize, how: Apply) -> Vec<String> {
+        let unit = &mut self.units[slot];
+        let name = unit.name.clone();
+        unit.reload_due = false;
+        match how {
+            Apply::Nothing => Vec::new(),
+            Apply::Restart => self.restart(slot),
+            Apply::Keep => vec![format!(
+                "{name}: not restarted (X-RestartIfChanged=false); it runs as it was started"
+            )],
+            Apply::RestartToReload => {
+                let mut messages = vec![format!("{name}: no ExecReload= to reload it with")];
+                messages.extend(self.restart(slot));
+                messages
+            }
+            Apply::Reload => {
+                // Into the new definition, whatever changed in it, if it is
+                // one that reloads rather than restarts (X-ReloadIfChanged=).
+                let next = unit.machine.next_service().clone();
+                unit.machine.replace_in_place(next);
+                match unit.why_not_reloadable() {
+                    None => vec![self.reload_unit(slot)],
+                    Some(why) => vec![why],
+                }
+            }
         }
     }
 
@@ -779,6 +935,8 @@ impl Manager {
                 .map(|d| d.saturating_duration_since(now).as_secs_f64()),
             wanted_by: service.wanted_by.clone(),
             changed: unit.machine.is_changed(),
+            reload_due: unit.reload_due,
+            last_reload: unit.machine.last_reload().map(|o| o.to_string()),
             timer: self.timer_status(slot),
             output_fallback: match &unit.output {
                 Some(Output::Fallback(why)) => Some(why.clone()),
@@ -1556,7 +1714,18 @@ impl Manager {
         if fresh && !to_channel {
             self.rotate_log(slot);
         }
-        let vars = env::merge(env::user_environment()?, &service.environment);
+        let mut vars = env::merge(env::user_environment()?, &service.environment);
+        // A command run beside the main process -- ExecStartPost=,
+        // ExecReload=, ExecStop= -- is told which process that is, as
+        // systemd tells it, when steward knows: not once a forking
+        // service's launcher has exited, nor for an adopted unit whose main
+        // process was gone.
+        if which == Process::Control {
+            if let Some(main) = &self.units[slot].main {
+                let pid = [("MAINPID".to_owned(), main.child.pid.to_string())];
+                vars = env::merge(vars, &pid);
+            }
+        }
         let directory = service
             .working_directory
             .clone()
@@ -1879,8 +2048,17 @@ impl Manager {
             return;
         }
         let at_rest = |s: State| matches!(s, State::Inactive | State::Failed);
+        let up = |s: State| matches!(s, State::Active | State::Reloading(_));
         let unit = &mut self.units[slot];
-        unit.since = (Instant::now(), crate::log::timestamp());
+        // A reload leaves it as active as it was, and since when.
+        if !(up(before) && up(after)) {
+            unit.since = (Instant::now(), crate::log::timestamp());
+        }
+        // Stopped, or starting again with what is on disk: a reload that
+        // was due is moot.
+        if at_rest(after) || after.is_starting() {
+            unit.reload_due = false;
+        }
         if at_rest(before) != at_rest(after) {
             let now = Some(SystemTime::now());
             if at_rest(after) {
@@ -1895,7 +2073,21 @@ impl Manager {
         let unit = &self.units[slot];
         let name = unit.name.clone();
         let last = unit.machine.last_outcome();
+        let reload_failed = matches!(before, State::Reloading(_))
+            && after == State::Active
+            && unit.machine.last_reload().is_some_and(|o| !o.is_clean());
         let line = match after {
+            State::Active if matches!(before, State::Reloading(_)) => {
+                match unit.machine.last_reload() {
+                    Some(Outcome::Clean) | None => "reloaded".to_owned(),
+                    Some(Outcome::Timeout) => {
+                        "reload failed: it timed out (TimeoutStartSec=); still active".to_owned()
+                    }
+                    Some(outcome) => {
+                        format!("reload failed: its command {outcome}; still active")
+                    }
+                }
+            }
             State::Active if unit.machine.service().is_timer() => {
                 let zone = Local::current();
                 match self.next_elapse_of(slot, SystemTime::now(), &zone) {
@@ -1932,6 +2124,9 @@ impl Manager {
         if after == State::Failed {
             error!("{name}: {line}");
             self.mark_at(slot, Level::Error, &line);
+        } else if reload_failed {
+            warning!("{name}: {line}");
+            self.mark_at(slot, Level::Warning, &line);
         } else {
             info!("{name}: {line}");
             self.mark(slot, &line);
@@ -2297,6 +2492,39 @@ impl Manager {
     }
 }
 
+/// What `switch` does to a running unit whose file changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Apply {
+    Nothing,
+    Restart,
+    Reload,
+    /// A reload, but there is no `ExecReload=` to reload it with: what it
+    /// was reloaded for is taken up by a restart instead.
+    RestartToReload,
+    /// `X-RestartIfChanged=false`: it runs on as it was started.
+    Keep,
+}
+
+/// How `switch` applies a `change` to a running unit, going to the
+/// definition `next`: as the change asks, save that home-manager's
+/// `X-ReloadIfChanged=true` makes a restart a reload, and
+/// `X-RestartIfChanged=false` leaves the unit be rather than restart it --
+/// each read from the new file, as NixOS's switch reads them.
+fn how_to_apply(change: Change, next: &Service) -> Apply {
+    let reload = match change {
+        Change::Nothing => return Apply::Nothing,
+        Change::Reload => true,
+        Change::Restart => next.entries.flag("Service", "X-ReloadIfChanged") == Some(true),
+    };
+    let restarts = next.entries.flag("Service", "X-RestartIfChanged") != Some(false);
+    match (reload, next.exec_reload.is_empty(), restarts) {
+        (true, false, _) => Apply::Reload,
+        (_, _, false) => Apply::Keep,
+        (true, true, true) => Apply::RestartToReload,
+        (false, _, true) => Apply::Restart,
+    }
+}
+
 /// Every unit in the unit directory that loads, and a line for each problem.
 fn read_units() -> Result<(Vec<Service>, Vec<String>), String> {
     let dir = steward_unit::user_unit_dir()
@@ -2416,7 +2644,88 @@ pub fn run_console() {
 
 #[cfg(test)]
 mod tests {
-    use super::quote;
+    use super::{how_to_apply, quote, Apply};
+    use steward_unit::compare::{compare, Change};
+    use steward_unit::{parse_service, Service};
+
+    fn unit(text: &str) -> Service {
+        parse_service("u.service", text).service.unwrap()
+    }
+
+    /// What switch does to a running unit going from one file to another.
+    fn switch(old: &str, new: &str) -> Apply {
+        let (old, new) = (unit(old), unit(new));
+        how_to_apply(compare(&old.entries, &new.entries), &new)
+    }
+
+    const PLAIN: &str = "[Service]\nExecStart=app.exe\n";
+    const RELOADS: &str = "[Service]\nExecStart=app.exe\nExecReload=app.exe --reload\n";
+
+    /// home-manager's restart trigger is a key the parser skips, so the
+    /// parsed units are the same; the files are not, and the unit restarts.
+    #[test]
+    fn a_changed_restart_trigger_restarts() {
+        let old = format!("[Unit]\nX-Restart-Triggers=aaa\n{PLAIN}");
+        let new = format!("[Unit]\nX-Restart-Triggers=bbb\n{PLAIN}");
+        assert_eq!(switch(&old, &new), Apply::Restart);
+        assert_eq!(switch(PLAIN, PLAIN), Apply::Nothing);
+    }
+
+    #[test]
+    fn a_changed_reload_trigger_reloads_or_restarts() {
+        let trigger =
+            |base: &str, value: &str| format!("[Unit]\nX-Reload-Triggers={value}\n{base}");
+        assert_eq!(
+            switch(&trigger(RELOADS, "aaa"), &trigger(RELOADS, "bbb")),
+            Apply::Reload
+        );
+        assert_eq!(switch(PLAIN, RELOADS), Apply::Reload);
+        // With nothing to reload it with, a restart takes its new
+        // configuration up instead...
+        assert_eq!(
+            switch(&trigger(PLAIN, "aaa"), &trigger(PLAIN, "bbb")),
+            Apply::RestartToReload
+        );
+        // ...unless it is not to be restarted.
+        let keep = |value: &str| format!("{}X-RestartIfChanged=false\n", trigger(PLAIN, value));
+        assert_eq!(switch(&keep("aaa"), &keep("bbb")), Apply::Keep);
+    }
+
+    #[test]
+    fn a_description_changes_nothing() {
+        assert_eq!(
+            switch(PLAIN, &format!("[Unit]\nDescription=App\n{PLAIN}")),
+            Apply::Nothing
+        );
+    }
+
+    #[test]
+    fn home_manager_s_switch_options() {
+        let with =
+            |base: &str, extra: &str| format!("{base}ExecStart=\nExecStart=new.exe\n{extra}");
+        assert_eq!(switch(RELOADS, &with(RELOADS, "")), Apply::Restart);
+        assert_eq!(
+            switch(RELOADS, &with(RELOADS, "X-ReloadIfChanged=true\n")),
+            Apply::Reload
+        );
+        assert_eq!(
+            switch(PLAIN, &with(PLAIN, "X-ReloadIfChanged=yes\n")),
+            Apply::RestartToReload
+        );
+        assert_eq!(
+            switch(PLAIN, &with(PLAIN, "X-RestartIfChanged=no\n")),
+            Apply::Keep
+        );
+        // A reload asked for is a reload, restart or no.
+        assert_eq!(
+            switch(
+                RELOADS,
+                &with(RELOADS, "X-ReloadIfChanged=1\nX-RestartIfChanged=0\n")
+            ),
+            Apply::Reload
+        );
+        assert_eq!(how_to_apply(Change::Nothing, &unit(PLAIN)), Apply::Nothing);
+    }
 
     /// Each quoted form reads back as the argument: checked against what
     /// `CommandLineToArgvW` does, which `std::env::args` follows.

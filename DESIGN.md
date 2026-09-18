@@ -225,6 +225,14 @@ template, but both had the default).
   does it (`steward --ctrl-c <pid>...`). Every process on a console hears it,
   including `KillMode=process` children that share their parent's console; a
   program started with `start /b` ignores it and is terminated at the timeout.
+- **A reload is its own commands.** Nor is there a SIGHUP, so `ExecReload=`
+  is whatever the program offers to take its configuration again, run in
+  turn in the service's job while the main process carries on; `MAINPID`
+  in the environment of it (and of `ExecStartPost=` and `ExecStop=`) names
+  the main process for a command that wants to message it. A reload is not
+  a start: no ordering, no start limit, no restart counted, under
+  `TimeoutStartSec=` as in systemd. A command that fails fails the reload,
+  not the service, which stays active; a stop cuts a reload short.
 - **Processes are created in their job** (`PROC_THREAD_ATTRIBUTE_JOB_LIST`), so
   nothing escapes in the instant before assignment, and inherit only the
   handles they need (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`): NUL for stdin, and
@@ -623,7 +631,8 @@ must be a single name -- stops with a service-specific exit code, for the
 record.
 
 The verbs follow `systemctl`: `list-units` (the default), `list-timers`,
-`status [unit...]`, `start`, `stop`, `restart` (waiting for the units to
+`status [unit...]`, `start`, `stop`, `restart`, `reload`,
+`reload-or-restart`, `try-reload-or-restart` (waiting for the units to
 settle unless `--no-block`), `is-active`, `daemon-reload`, and
 `logs [-f] [-n N]`, which reads the channel or the log file itself. `whkd` means `whkd.service`. Two differ:
 
@@ -637,6 +646,20 @@ settle unless `--no-block`), `is-active`, `daemon-reload`, and
   at rest. `daemon-reload` alone only takes note: a
   changed unit keeps running as it was started (its `ExecStop=` included)
   until it is restarted, and is marked changed until then.
+
+  What a change asks for is decided on the file as written, key by key, as
+  NixOS's `switch-to-configuration` decides it (`compare_units`), not on the
+  parsed unit -- which drops every `X-` key, and so once missed a changed
+  `X-Restart-Triggers=`. A difference only in `[Unit] X-Reload-Triggers=` or
+  `[Service] ExecReload=` is a reload: the new definition is taken at once
+  (it changes nothing the processes were started with) and a running unit
+  is reloaded, or restarted if it has no `ExecReload=`. A difference only in
+  NixOS's harmless `[Unit]` keys (`Description=`, `Documentation=`, ...) is
+  taken at once and nothing more. Anything else, any other `X-` key
+  included, is a restart. `[Service] X-ReloadIfChanged=true` turns a restart
+  into a reload into the new definition, and `X-RestartIfChanged=false`
+  leaves the unit running as it was, marked changed; `X-SwitchMethod=` is
+  not read.
 - **No `enable`/`disable`.** A unit is enabled by its `[Install] WantedBy=`;
   the unit files are declared (by Nix), so there is no second source of truth
   to keep. A unit is stopped for the session with `stop`, and for good by
@@ -677,12 +700,13 @@ Where Windows differs:
   ordinary character, for the same reason.
 - **Unknown keys are warnings, not errors**, so a unit written for Linux still
   loads and says what it ignored. `X-` sections and keys are ignored silently,
-  as systemd does.
+  as systemd does -- by the parser; the file's entries, every key in them, are
+  kept beside the parsed unit for `switch` to compare.
 
 Version 1 understands: `[Unit]` `Description`, `Documentation`, `After`,
 `Before`, `Wants`, `Requires`, `PartOf`, `StartLimitBurst`, `StartLimitIntervalSec`;
 `[Service]` `Type` (`simple`, `exec`, `forking`, `oneshot`), `ExecStart`,
-`ExecStartPre`, `ExecStartPost`, `ExecStop`, `Restart`, `RestartSec`,
+`ExecStartPre`, `ExecStartPost`, `ExecStop`, `ExecReload`, `Restart`, `RestartSec`,
 `RestartSteps`, `RestartMaxDelaySec`, `TimeoutStartSec`, `TimeoutStopSec`,
 `TimeoutSec`, `WorkingDirectory`, `Environment`, `KillMode`; `[Timer]`
 `OnCalendar`, `OnActiveSec`, `OnBootSec`, `OnStartupSec`, `OnUnitActiveSec`,
@@ -884,7 +908,8 @@ home-manager runs on systemd, and has nothing to enable.
   Units are free-form `Section.Key` attributes rendered as home-manager
   renders them, which steward reads as systemd would; `X-Restart-Triggers=`
   and `X-Reload-Triggers=`, which name store paths, are written as their
-  hash, so a changed trigger still changes the file. The module also
+  hash, so a changed trigger still changes the file, and `switch`, comparing
+  the files key by key, restarts or reloads the unit for it. The module also
   declares a winpkgs activation, triggered by the rendered units, that runs
   `stewctl switch --if-running` at the end of an apply that changed them --
   after pruning, so a removed unit's file is gone -- as home-manager runs

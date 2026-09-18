@@ -71,7 +71,8 @@ impl From<State> for Progress {
         match state {
             State::Inactive => Progress::Idle,
             State::Failed => Progress::Failed,
-            State::Active => Progress::Active,
+            // A reload leaves it up: nothing waits for it to finish.
+            State::Active | State::Reloading(_) => Progress::Active,
             // It is coming back: what is ordered after it waits for it.
             State::AutoRestart => Progress::Starting,
             s if s.is_starting() => Progress::Starting,

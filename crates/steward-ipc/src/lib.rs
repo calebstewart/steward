@@ -40,11 +40,27 @@ pub enum Request {
     Restart {
         units: Vec<String>,
     },
+    /// Run these units' `ExecReload=` while they keep running. Refused,
+    /// doing nothing, unless every one of them is an active service that
+    /// has `ExecReload=`.
+    ReloadUnits {
+        units: Vec<String>,
+    },
+    /// Reload the units that can be reloaded -- active services with
+    /// `ExecReload=` -- and restart the rest; with `only_running`, leave
+    /// those at rest alone rather than start them.
+    ReloadOrRestart {
+        units: Vec<String>,
+        #[serde(default)]
+        only_running: bool,
+    },
     /// Read the unit files again. A removed unit is stopped; a changed one
-    /// keeps running with its old definition until it is restarted. With
-    /// `apply`, the running set is made to match the files: changed units
-    /// that run are restarted, and new units, newly wanted ones and failed
-    /// ones that changed are started. A unit stopped on purpose stays stopped.
+    /// keeps running with its old definition until it is restarted, or, if
+    /// the change is only in what a reload runs or is triggered by, takes
+    /// the new one at once, to be reloaded. With `apply`, the running set is
+    /// made to match the files: changed units that run are restarted or
+    /// reloaded, and new units, newly wanted ones and failed ones that
+    /// changed are started. A unit stopped on purpose stays stopped.
     Reload {
         apply: bool,
     },
@@ -110,6 +126,15 @@ pub struct UnitStatus {
     pub wanted_by: Vec<String>,
     /// Its unit file changed and it has not been restarted since.
     pub changed: bool,
+    /// Its unit file changed only in what a reload runs or is triggered by,
+    /// and it has not been reloaded (or restarted) since.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reload_due: bool,
+    /// How its last reload since it started ended, in words: `exited
+    /// cleanly` if every `ExecReload=` command did. Absent if it has not
+    /// been reloaded, or a reload is running or was cut short.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reload: Option<String>,
     /// A timer's schedule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timer: Option<TimerStatus>,
@@ -147,8 +172,9 @@ pub struct TimerStatus {
 }
 
 impl UnitStatus {
+    /// Up: active, or active and reloading.
     pub fn is_active(&self) -> bool {
-        self.state == "active"
+        matches!(self.state.as_str(), "active" | "reload")
     }
 
     /// Still on its way up from a start.
@@ -171,6 +197,24 @@ mod tests {
         assert_eq!(serde_json::from_str::<Request>(&json).unwrap(), request);
         let reload: Request = serde_json::from_str(r#"{"request":"reload","apply":true}"#).unwrap();
         assert_eq!(reload, Request::Reload { apply: true });
+        // A unit's reload is not the manager's.
+        let units = Request::ReloadUnits {
+            units: vec!["whkd.service".into()],
+        };
+        assert_eq!(
+            serde_json::to_string(&units).unwrap(),
+            r#"{"request":"reload-units","units":["whkd.service"]}"#
+        );
+        let either: Request =
+            serde_json::from_str(r#"{"request":"reload-or-restart","units":["a.service"]}"#)
+                .unwrap();
+        assert_eq!(
+            either,
+            Request::ReloadOrRestart {
+                units: vec!["a.service".into()],
+                only_running: false
+            }
+        );
     }
 
     #[test]

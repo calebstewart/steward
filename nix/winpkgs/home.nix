@@ -47,8 +47,10 @@ let
   };
 
   # home-manager's triggers name store paths, which winpkgs will not write into
-  # a file. steward ignores X- keys; all a trigger has to do is change the
-  # file, so `stewctl switch` restarts the unit. Their hash does that.
+  # a file. All a trigger has to do is change the file: `stewctl switch`
+  # compares the files key by key, and restarts the unit for a changed
+  # X-Restart-Triggers or reloads it for a changed X-Reload-Triggers. Their
+  # hash does that.
   triggers = [
     "X-Restart-Triggers"
     "X-Reload-Triggers"

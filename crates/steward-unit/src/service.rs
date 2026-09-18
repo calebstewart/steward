@@ -13,7 +13,9 @@
 //! (`After=`, `Environment=`, `ExecStartPre=`, ...) accumulates, and an empty
 //! assignment resets it. Keys and sections steward does not know are warnings,
 //! so a unit written for Linux still loads and says what it ignored; `X-`
-//! sections and keys are ignored silently, as systemd does.
+//! sections and keys are ignored silently, as systemd does. Every key, known
+//! or not, is kept as written in [`Service::entries`], for `switch` to
+//! compare.
 //!
 //! Where Windows differs from systemd:
 //! - `Exec*=` values are Windows command lines, passed to `CreateProcessW` as
@@ -37,6 +39,7 @@ use std::fmt;
 use std::time::Duration;
 
 use crate::calendar::parse_calendar;
+use crate::compare::Entries;
 use crate::syntax::{self, Entry, UnitFile};
 use crate::time::parse_timespan;
 use crate::timer::{Timer, Trigger};
@@ -177,6 +180,9 @@ pub struct Service {
     pub exec_start_pre: Vec<Command>,
     pub exec_start_post: Vec<Command>,
     pub exec_stop: Vec<Command>,
+    /// Run one after another while the main process keeps running, to have
+    /// it take its configuration again.
+    pub exec_reload: Vec<Command>,
     pub restart: Restart,
     /// The delay before the first automatic restart.
     pub restart_sec: Duration,
@@ -199,6 +205,10 @@ pub struct Service {
     pub timer: Option<Timer>,
 
     pub wanted_by: Vec<String>,
+
+    /// The file as written, the keys the parser skips included: what
+    /// `switch` compares to tell a restart from a reload ([`crate::compare`]).
+    pub entries: Entries,
 }
 
 impl Service {
@@ -234,6 +244,7 @@ impl Service {
             exec_start_pre: Vec::new(),
             exec_start_post: Vec::new(),
             exec_stop: Vec::new(),
+            exec_reload: Vec::new(),
             restart: Restart::OnFailure,
             restart_sec: Duration::from_secs(1),
             restart_steps: 5,
@@ -246,6 +257,7 @@ impl Service {
             standard_output: None,
             timer: (kind == UnitKind::Timer).then(|| Timer::new(name)),
             wanted_by: Vec::new(),
+            entries: Entries::default(),
         }
     }
 }
@@ -336,6 +348,7 @@ impl Reader {
             );
         }
         let mut s = Service::new(name, kind);
+        s.entries = Entries::of(file);
         for section in &file.sections {
             match section.name.as_str() {
                 "Unit" => section
@@ -416,6 +429,7 @@ impl Reader {
             "ExecStartPre" => self.commands(e, &mut s.exec_start_pre),
             "ExecStartPost" => self.commands(e, &mut s.exec_start_post),
             "ExecStop" => self.commands(e, &mut s.exec_stop),
+            "ExecReload" => self.commands(e, &mut s.exec_reload),
             "Restart" => {
                 s.restart = match e.value.as_str() {
                     "no" => Restart::No,
@@ -884,6 +898,55 @@ WantedBy=graphical-session.target
         assert_eq!(s.exec_stop.len(), 1);
         assert_eq!(s.exec_stop[0].line, "two.exe");
         assert_eq!(s.environment, [("C".into(), "3".into())]);
+    }
+
+    /// `ExecReload=` is a list of commands like `ExecStop=`: the `-` prefix,
+    /// the others refused, and an empty assignment starting it over.
+    #[test]
+    fn exec_reload() {
+        let s = ok(
+            "[Service]\nExecStart=x.exe\nExecReload=old.exe\nExecReload=\n\
+                    ExecReload=x.exe --reload\nExecReload=-notify.exe\n",
+        );
+        assert_eq!(
+            s.exec_reload,
+            [
+                Command {
+                    line: "x.exe --reload".into(),
+                    ignore_failure: false
+                },
+                Command {
+                    line: "notify.exe".into(),
+                    ignore_failure: true
+                }
+            ]
+        );
+        assert!(ok("[Service]\nExecStart=x.exe\n").exec_reload.is_empty());
+        assert_eq!(
+            messages("[Service]\nExecStart=x.exe\nExecReload=+x.exe --reload\n"),
+            ["line 3: error: the '+' prefix on ExecReload= is not supported"]
+        );
+        assert_eq!(
+            messages("[Service]\nExecStart=x.exe\nExecReload=C:\\My Tools\\r.exe\n"),
+            [
+                "line 3: warning: ExecReload= names a program whose path has a space, unquoted: \
+                 Windows tries C:\\My.exe first. Quote it: \"C:\\My Tools\\r.exe\""
+            ]
+        );
+    }
+
+    /// The file's entries are kept as written, the keys the parser skips
+    /// among them, for `switch` to compare.
+    #[test]
+    fn the_entries_keep_what_the_parser_skips() {
+        let text = "[Unit]\nX-Restart-Triggers=abc\n[Service]\nExecStart=x.exe\n";
+        let s = ok(text);
+        assert_eq!(
+            s.entries,
+            crate::compare::Entries::of(&syntax::parse(text).unwrap())
+        );
+        // Two files that mean the same differ in their entries all the same.
+        assert_ne!(s, ok("[Service]\nExecStart=x.exe\n"));
     }
 
     #[test]
