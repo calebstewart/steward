@@ -51,10 +51,12 @@ use windows_sys::Win32::System::SystemServices::{
 use crate::control::{self, Refusal};
 use crate::log::{error, info, warning};
 use crate::state::{
-    self, from_millis, to_millis, RestState, Saved, SavedProcess, SavedRest, SavedTimer, SavedUnit,
+    self, from_millis, to_millis, RestState, Saved, SavedPipe, SavedProcess, SavedRest, SavedShim,
+    SavedTimer, SavedUnit,
 };
 use crate::sys::clock::{self, Local};
 use crate::sys::job::Job;
+use crate::sys::pipe;
 use crate::sys::port::{Packet, Port, Waker};
 use crate::sys::process::{self, Child, ExitWatch, Handles};
 use crate::sys::{self, env, signal};
@@ -151,13 +153,29 @@ enum Output {
     /// The manager keeps a copy of each read end too, which it never reads:
     /// it is there so that a shim that dies can be replaced on the same
     /// pipes ([`Manager::shim_exited`]), and it is what makes the unit's
-    /// writes wait rather than fail in the moment between the two.
+    /// writes wait rather than fail in the moment between the two. A manager
+    /// that adopted the unit has those copies too, taken back out of the
+    /// shim itself ([`Manager::recover_shim`]).
     EventLog {
-        stdout: OwnedHandle,
-        stderr: OwnedHandle,
+        /// The write ends: the manager's own copy of each, which every
+        /// process it starts for the unit inherits.
+        ///
+        /// `None` for a run this manager adopted. Those write ends were the
+        /// last manager's and went with it; only the unit's own processes
+        /// hold one now, which is enough to keep the pipe open and to let
+        /// the reader be replaced, and not enough to start a process on it.
+        /// What this manager starts for the unit next gets pipes of its own.
+        writes: Option<(OwnedHandle, OwnedHandle)>,
         /// The read ends, kept only to hand to a replacement shim. Closing
         /// them is how the manager gives up on one.
         reads: (OwnedHandle, OwnedHandle),
+        /// The same two read ends as the *shim* holds them -- the number it
+        /// inherited each with, and the name of the pipe behind it -- which
+        /// is what the state file carries and the next manager looks them up
+        /// by. `None` if the pipes could not be named, since the name is the
+        /// only check that a number still means this pipe: then no later
+        /// manager takes them back.
+        pipes: Option<(SavedPipe, SavedPipe)>,
         shim: Tracked,
         /// Replacements started in the window that began at `window`.
         replacements: u32,
@@ -196,9 +214,10 @@ struct Unit {
     /// every time it is tried again.
     log_warned: bool,
     /// Where this run's output goes, once a run has begun. `None` for a
-    /// unit whose output goes to its file, which opens it at each spawn, and
-    /// for a unit adopted from another manager, whose pipes and
-    /// shim were that manager's.
+    /// unit whose output goes to its file, which opens it at each spawn.
+    /// A unit adopted from another manager has an [`Output::EventLog`] with
+    /// no write ends if this manager could take its shim's read ends back,
+    /// and `None` if it could not.
     output: Option<Output>,
 }
 
@@ -892,9 +911,16 @@ impl Manager {
             let unit = &mut self.units[slot];
             unit.job_empty_fed = false;
             unit.main = main;
-            // The last manager's pipes and shim went with it; its fallback,
-            // if it had one, is still where the processes write.
+            // The last manager's write ends went with it; its fallback, if it
+            // had one, is still where the processes write. Its shim reads on,
+            // and this manager takes back the read ends it needs to replace
+            // it if it dies.
             unit.output = record.output_fallback.clone().map(Output::Fallback);
+            if unit.output.is_none() {
+                if let Some(saved) = &record.shim {
+                    self.recover_shim(slot, saved);
+                }
+            }
             match pid {
                 Some(pid) => info!("{name}: adopted, main process {pid}"),
                 None => info!("{name}: adopted what is left of it; the main process is gone"),
@@ -943,6 +969,69 @@ impl Manager {
             self.restore_rest(&name, rest);
         }
         self.dirty = true;
+    }
+
+    /// The `steward-cat` of a unit adopted from another manager: its two
+    /// read ends taken back out of the shim itself, so that this manager can
+    /// replace it as the manager that made the pipes could.
+    ///
+    /// The shim is re-opened by PID and creation time, as the unit's own
+    /// processes are, with `PROCESS_DUP_HANDLE` besides; each read end is
+    /// copied out of it by the number it was inherited with; and each copy
+    /// is checked against the name the last manager recorded ([`take_pipe`]).
+    /// Both halves are the same user's, so nothing here is elevated.
+    ///
+    /// The write ends are neither recovered nor needed: the unit's own
+    /// processes hold them, which is what keeps the pipes open, and a
+    /// replacement reader needs only the read ends. The allowance starts
+    /// fresh -- this manager saw none of the last one's replacements -- and
+    /// what it starts for the unit next still gets pipes and a shim of its
+    /// own.
+    ///
+    /// Nothing here is fatal. A shim that has gone, a number that does not
+    /// check out, a refused `PROCESS_DUP_HANDLE` or a state file from before
+    /// any of this was written leaves the unit exactly as it was adopted
+    /// before: its shim reading, and nothing to replace it if it dies.
+    fn recover_shim(&mut self, slot: usize, saved: &SavedShim) {
+        let name = self.units[slot].name.clone();
+        match self.take_shim(saved) {
+            Ok((reads, shim)) => {
+                let pid = shim.child.pid;
+                self.units[slot].output = Some(Output::EventLog {
+                    writes: None,
+                    reads,
+                    pipes: Some((saved.stdout.clone(), saved.stderr.clone())),
+                    shim,
+                    replacements: 0,
+                    window: Instant::now(),
+                });
+                info!(
+                    "{name}: steward-cat {pid} carries its output still, and can be replaced \
+                     if it dies"
+                );
+            }
+            Err(e) => info!(
+                "{name}: the read ends of its steward-cat {} cannot be taken back ({e}); it \
+                 reads on, and nothing replaces it if it dies",
+                saved.pid
+            ),
+        }
+    }
+
+    /// The shim re-opened and its two read ends copied out, or the first
+    /// thing that went wrong. Order matters on the way out: a copy that
+    /// checks out is dropped with the rest if the other does not.
+    fn take_shim(
+        &mut self,
+        saved: &SavedShim,
+    ) -> std::io::Result<((OwnedHandle, OwnedHandle), Tracked)> {
+        let child = Child::open_shim(saved.pid, saved.created)?;
+        let reads = (
+            take_pipe(&child, &saved.stdout)?,
+            take_pipe(&child, &saved.stderr)?,
+        );
+        let shim = self.track(child).map_err(|(_, e)| e)?;
+        Ok((reads, shim))
     }
 
     /// Leave a unit where the last manager left it: stopped, finished,
@@ -1546,11 +1635,22 @@ impl Manager {
         }
         let service = self.units[slot].machine.service().clone();
         // A run's output is decided at its first spawn -- or, for a unit
-        // adopted from another manager, at this manager's first: the pipes
-        // and the shim were the other's and went with it, so what this one
-        // starts for the unit gets a shim of its own.
-        if self.units[slot].output.is_none() && self.to_channel(slot) {
-            self.open_channel(slot);
+        // adopted from another manager, at this manager's first: the write
+        // ends were the other's and went with it, so what this one starts
+        // for the unit gets pipes and a shim of its own. The shim this
+        // manager took back reads on for the processes that still hold one
+        // of its write ends, and this manager stops holding a read end for
+        // it: that is where its protection ends.
+        let adopted = matches!(
+            self.units[slot].output,
+            Some(Output::EventLog { writes: None, .. })
+        );
+        if self.units[slot].output.is_none() || adopted {
+            let to_channel = self.to_channel(slot);
+            self.units[slot].output = None;
+            if to_channel {
+                self.open_channel(slot);
+            }
         }
         let to_channel = matches!(self.units[slot].output, Some(Output::EventLog { .. }));
         if fresh && !to_channel {
@@ -1571,7 +1671,10 @@ impl Manager {
         let job = unit.job.as_ref().expect("created above");
         let log;
         let (stdout, stderr) = match &unit.output {
-            Some(Output::EventLog { stdout, stderr, .. }) => (stdout, stderr),
+            Some(Output::EventLog {
+                writes: Some((stdout, stderr)),
+                ..
+            }) => (stdout, stderr),
             _ => {
                 log = process::open_log(&self.log_path(slot).ok_or_else(no_state_dir)?)?;
                 (&log, &log)
@@ -1665,11 +1768,15 @@ impl Manager {
     fn start_shim(&mut self, name: &str) -> std::io::Result<Output> {
         let (out_read, out_write) = process::pipe()?;
         let (err_read, err_write) = process::pipe()?;
+        // Named before the shim exists, and from the manager's own handles:
+        // the shim's copies are inherited, so they carry both the same
+        // numbers and the same two pipes.
+        let pipes = recorded(name, &out_read, &err_read);
         let shim = self.spawn_shim(name, &out_read, &err_read)?;
         Ok(Output::EventLog {
-            stdout: out_write,
-            stderr: err_write,
+            writes: Some((out_write, err_write)),
             reads: (out_read, err_read),
+            pipes,
             shim,
             replacements: 0,
             window: Instant::now(),
@@ -1755,9 +1862,9 @@ impl Manager {
     /// the unit next writes to its file.
     fn shim_exited(&mut self, slot: usize) {
         let Some(Output::EventLog {
-            stdout,
-            stderr,
+            writes,
             reads,
+            pipes,
             shim,
             replacements,
             window,
@@ -1770,8 +1877,20 @@ impl Manager {
             "steward-cat {} exited (0x{code:X}) with the unit still running",
             shim.child.pid
         );
+        let pid = shim.child.pid;
         drop(shim);
         let name = self.units[slot].name.clone();
+        // Not a death at all: every write end is closed, so the shim read to
+        // the end of the output and stopped, and a replacement would find
+        // the pipe broken and stop too. Only a run this manager adopted can
+        // be here -- one whose pipes it made holds a write end itself, which
+        // is a writer until [`Manager::release_job`] lets go of it -- and
+        // this is how such a run ordinarily ends: its last process exited.
+        if !pipe::has_writer(&reads.0) && !pipe::has_writer(&reads.1) {
+            info!("{name}: steward-cat {pid} read its output to the end and exited");
+            self.dirty = true;
+            return;
+        }
         // A window that has run out begins again with this death.
         let now = Instant::now();
         let (replacements, window) = if now.duration_since(window) >= SHIM_RESTART_WINDOW {
@@ -1789,14 +1908,31 @@ impl Manager {
                 Ok(shim) => {
                     let pid = shim.child.pid;
                     info!("{name}: {why}; steward-cat {pid} reads its pipes from here on");
+                    // The replacement inherited *these* handles, so the
+                    // numbers to record are this manager's -- which is a
+                    // change only for a run it adopted, where they were the
+                    // dead shim's. The pipes themselves are the same two.
+                    let pipes = pipes.map(|(out, err)| {
+                        (
+                            SavedPipe {
+                                handle: number(&reads.0),
+                                ..out
+                            },
+                            SavedPipe {
+                                handle: number(&reads.1),
+                                ..err
+                            },
+                        )
+                    });
                     self.units[slot].output = Some(Output::EventLog {
-                        stdout,
-                        stderr,
+                        writes,
                         reads,
+                        pipes,
                         shim,
                         replacements: replacements + 1,
                         window,
                     });
+                    self.dirty = true;
                     // Between the dead shim's last event and this one's
                     // first, which is where the gap is. Neither of them can
                     // say how big it was -- the bytes went with the dead
@@ -1818,7 +1954,7 @@ impl Manager {
         // Closing the read ends is what makes the unit's next write fail
         // rather than wait forever on a pipe nothing will ever drain.
         drop(reads);
-        drop((stdout, stderr));
+        drop(writes);
         let why = format!("{why}, and {}", refused.expect("set on every path here"));
         error!("{name}: {why}; its output from here on goes to its log file");
         self.units[slot].output = Some(Output::Fallback(why.clone()));
@@ -2249,12 +2385,29 @@ impl Manager {
                 Some(Output::Fallback(why)) => Some(why.clone()),
                 _ => None,
             };
+            // A shim goes in the file only with both pipes named: that is
+            // what the next manager checks the numbers against, and without
+            // it there is nothing for it to act on.
+            let shim = match &unit.output {
+                Some(Output::EventLog {
+                    pipes: Some((stdout, stderr)),
+                    shim,
+                    ..
+                }) => Some(SavedShim {
+                    pid: shim.child.pid,
+                    created: shim.child.created,
+                    stdout: stdout.clone(),
+                    stderr: stderr.clone(),
+                }),
+                _ => None,
+            };
             saved.units.insert(
                 unit.name.clone(),
                 SavedUnit {
                     main,
                     processes,
                     output_fallback,
+                    shim,
                 },
             );
         }
@@ -2334,6 +2487,68 @@ fn settles_empty(job: &Job) -> bool {
         std::thread::sleep(Duration::from_millis(5));
     }
     false
+}
+
+/// A handle's number, as a child that inherits it will hold it and as the
+/// state file records it.
+fn number(handle: &OwnedHandle) -> u64 {
+    handle.as_raw_handle() as usize as u64
+}
+
+/// The two read ends as the shim will hold them, for the state file: each
+/// one's number and the name of the pipe behind it.
+///
+/// `None` if either cannot be named. The name is the whole check a later
+/// manager has that a number still means this pipe, so a pipe without one is
+/// simply not offered: that manager adopts the unit as it did before any of
+/// this, and only the protection of the shim is lost.
+fn recorded(
+    unit: &str,
+    out_read: &OwnedHandle,
+    err_read: &OwnedHandle,
+) -> Option<(SavedPipe, SavedPipe)> {
+    match (pipe::name_of(out_read), pipe::name_of(err_read)) {
+        (Ok(out), Ok(err)) => Some((
+            SavedPipe {
+                handle: number(out_read),
+                name: out,
+            },
+            SavedPipe {
+                handle: number(err_read),
+                name: err,
+            },
+        )),
+        (out, err) => {
+            let e = out.err().or_else(|| err.err()).expect("one of them failed");
+            warning!(
+                "{unit}: its pipes cannot be named ({e}); a manager that adopts it cannot take \
+                 them back to replace its steward-cat"
+            );
+            None
+        }
+    }
+}
+
+/// One read end copied out of the shim and checked to be the pipe it is
+/// supposed to be: a pipe at all, and the one of that name. A number the
+/// shim closed and opened again would otherwise put whatever it opened
+/// where the unit's output belongs.
+fn take_pipe(shim: &Child, saved: &SavedPipe) -> std::io::Result<OwnedHandle> {
+    let handle = shim.duplicate(saved.handle)?;
+    if !pipe::is_pipe(&handle) {
+        return Err(std::io::Error::other(format!(
+            "handle {:#x} in it is not a pipe any more",
+            saved.handle
+        )));
+    }
+    let name = pipe::name_of(&handle)?;
+    if name != saved.name {
+        return Err(std::io::Error::other(format!(
+            "handle {:#x} in it is {name} now, not {}",
+            saved.handle, saved.name
+        )));
+    }
+    Ok(handle)
 }
 
 /// A random number, for `RandomizedDelaySec=`: std's hasher keys are random.
