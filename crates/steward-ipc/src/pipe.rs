@@ -197,7 +197,7 @@ fn path_of(name: &OsStr) -> io::Result<String> {
 /// `\\.\pipe\steward-<user SID>-<session>`: this user's manager in this
 /// process's session. `STEWARD_PIPE` names another, for a second manager
 /// beside the one that runs -- `steward --console` in scratch directories --
-/// and the `stewctl` that talks to it; the server is still checked to be the
+/// and the `stewardctl` that talks to it; the server is still checked to be the
 /// user's. It must be one name: nothing with a separator in it, and not `.`
 /// or `..`.
 pub fn name() -> io::Result<String> {

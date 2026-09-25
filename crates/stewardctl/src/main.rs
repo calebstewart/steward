@@ -1,4 +1,4 @@
-//! stewctl: the command line for steward, after `systemctl --user`.
+//! stewardctl: the command line for steward, after `systemctl --user`.
 //!
 //! Everything but `verify` and `logs` asks the running manager, over its
 //! pipe. `logs` asks it where the logs are and which units exist, then reads
@@ -20,8 +20,8 @@ use clap::{Parser, Subcommand};
 use steward_ipc::{Request, Response, TimerStatus, UnitStatus, OUTPUT_EVENTLOG};
 use steward_unit::{LoadedUnit, Output, Severity};
 
-/// Everything stewctl prints goes through this rather than std's `println!`,
-/// which panics when the reader has gone -- `stewctl logs whkd | Select-Object
+/// Everything stewardctl prints goes through this rather than std's `println!`,
+/// which panics when the reader has gone -- `stewardctl logs whkd | Select-Object
 /// -First 3`, or a pager that is quit. Defined here, it is the `println!` the
 /// whole file uses.
 macro_rules! println {
@@ -47,7 +47,7 @@ fn stdout_failed(e: std::io::Error) -> ! {
     if e.kind() == std::io::ErrorKind::BrokenPipe || matches!(e.raw_os_error(), Some(232 | 109)) {
         std::process::exit(0);
     }
-    eprintln!("stewctl: cannot write the output: {e}");
+    eprintln!("stewardctl: cannot write the output: {e}");
     std::process::exit(1);
 }
 
@@ -191,7 +191,7 @@ fn main() -> ExitCode {
         Command::Verify { files } => Ok(verify(files)),
     };
     result.unwrap_or_else(|message| {
-        eprintln!("stewctl: {message}");
+        eprintln!("stewardctl: {message}");
         ExitCode::FAILURE
     })
 }
@@ -291,9 +291,11 @@ fn list() -> Outcome {
         );
     }
     if response.units.iter().any(|u| u.changed) {
-        println!("\n* changed on disk; restart it (or `stewctl switch`) to use the new definition");
+        println!(
+            "\n* changed on disk; restart it (or `stewardctl switch`) to use the new definition"
+        );
     } else if response.units.iter().any(|u| u.reload_due) {
-        println!("\n* changed on disk; reload it (or `stewctl switch`) to apply the change");
+        println!("\n* changed on disk; reload it (or `stewardctl switch`) to apply the change");
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -582,7 +584,7 @@ fn wait_until_settled(units: &[String], reload: bool) -> Outcome {
                         Some(why) => {
                             println!(
                                 "{}: reload failed: its command {why}; still active; see \
-                                 stewctl status {}",
+                                 stewardctl status {}",
                                 unit.name, unit.name
                             );
                             code = ExitCode::FAILURE;
@@ -600,7 +602,7 @@ fn wait_until_settled(units: &[String], reload: bool) -> Outcome {
                             .map(|o| format!(": it {o}"))
                             .unwrap_or_default();
                         println!(
-                            "{}: {state}{why}; see stewctl status {}",
+                            "{}: {state}{why}; see stewardctl status {}",
                             unit.name, unit.name
                         );
                         code = ExitCode::FAILURE;
@@ -1009,7 +1011,7 @@ fn channel_logs(_unit: &str, _lines: usize, _follow: bool, _note: &str) -> Outco
 fn verify(files: Vec<PathBuf>) -> ExitCode {
     let units: Vec<LoadedUnit> = if files.is_empty() {
         let Some(dir) = steward_unit::user_unit_dir() else {
-            eprintln!("stewctl: APPDATA is not set; name the unit files to check");
+            eprintln!("stewardctl: APPDATA is not set; name the unit files to check");
             return ExitCode::from(2);
         };
         match steward_unit::load_dir(&dir) {
@@ -1019,7 +1021,7 @@ fn verify(files: Vec<PathBuf>) -> ExitCode {
             }
             Ok(units) => units,
             Err(e) => {
-                eprintln!("stewctl: cannot read {}: {e}", dir.display());
+                eprintln!("stewardctl: cannot read {}: {e}", dir.display());
                 return ExitCode::from(2);
             }
         }

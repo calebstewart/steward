@@ -5,10 +5,11 @@ starts at sign-in as a per-user service, keeps your desktop daemons running,
 and tells you what they are doing.
 
 - `steward` -- the manager, hosted by the SCM as a per-user service.
-- `stewctl` -- the command line.
+- `stewardctl` -- the command line. It was `stewctl` until 2026-09; that name
+  now belongs to the StewOS management command.
 
 The documentation is at **<https://calebstew.art/steward>**: installation,
-every unit key, targets, timers and every `stewctl` command. See
+every unit key, targets, timers and every `stewardctl` command. See
 [DESIGN.md](DESIGN.md) for the design, what has been established on a real
 machine, and the roadmap. Supervision (M1) and the control plane (M2) are
 done, and so are integration with winpkgs (M3), the desktop's daemons
@@ -37,7 +38,7 @@ about restarting is restarted when it fails, with a backoff from a second to a
 minute. `default.target` is reached at sign-in, `graphical-session.target`
 once Explorer's taskbar exists, and `tray.target` once the tray takes icons,
 about a second later: a tray program orders itself `After=tray.target`.
-`stewctl verify` checks unit files without a manager.
+`stewardctl verify` checks unit files without a manager.
 
 A `*.target` file is a target of your own, which runs nothing: `[Unit]` and
 `[Install]` only. Units that say `WantedBy=` it start when it does, and units
@@ -53,8 +54,8 @@ WantedBy=graphical-session.target
 ```
 
 With `WantedBy=tiling.target` and `PartOf=tiling.target` in komorebi's,
-whkd's and masir's units, `stewctl stop tiling.target` puts all three away and
-`stewctl start tiling.target` brings them back. As in systemd, stopping a
+whkd's and masir's units, `stewardctl stop tiling.target` puts all three away and
+`stewardctl start tiling.target` brings them back. As in systemd, stopping a
 unit also stops what `Requires=` it; what only `Wants=` it keeps running.
 
 A `*.timer` file starts a unit when it elapses -- by default the service
@@ -74,7 +75,7 @@ WantedBy=timers.target
 `*:0/15`), in local time or UTC; `OnBootSec=`, `OnStartupSec=` (from
 sign-in), `OnActiveSec=`, `OnUnitActiveSec=` and `OnUnitInactiveSec=` count
 from what they say, on the wall clock, time asleep included. `Persistent=`
-makes up a run missed while you were signed out. `stewctl list-timers` shows
+makes up a run missed while you were signed out. `stewardctl list-timers` shows
 when each timer next elapses.
 
 [`examples/`](examples) has units to try, each saying what it shows: a console
@@ -85,16 +86,16 @@ timer.
 ## Using it
 
 ```
-stewctl                    # list the units
-stewctl list-timers        # the timers: when each next elapses, and last did
-stewctl status whkd        # one unit in detail, with the end of its log
-stewctl start|stop|restart whkd
-stewctl logs -f whkd       # its output, and steward's lines about it
-stewctl switch             # re-read the units; restart the changed, start the new
+stewardctl                    # list the units
+stewardctl list-timers        # the timers: when each next elapses, and last did
+stewardctl status whkd        # one unit in detail, with the end of its log
+stewardctl start|stop|restart whkd
+stewardctl logs -f whkd       # its output, and steward's lines about it
+stewardctl switch             # re-read the units; restart the changed, start the new
 ```
 
 Each unit's output goes to your Event Log channel, one per user, where the
-install below has set the channels up; read it with `stewctl logs`, Event
+install below has set the channels up; read it with `stewardctl logs`, Event
 Viewer or `Get-WinEvent`. Without that install, and for a unit that says
 `StandardOutput=file`, it goes to `%LOCALAPPDATA%\steward\logs\<unit>.log`.
 The manager's own log is always `%LOCALAPPDATA%\steward\steward.log`.
@@ -111,7 +112,7 @@ cargo test
 With Nix (on Linux or in WSL), cross-compiled for Windows:
 
 ```
-nix build          # result/bin/steward.exe, result/bin/stewctl.exe
+nix build          # result/bin/steward.exe, result/bin/stewardctl.exe
 nix flake check    # the platform-free crates' tests natively, the Windows build, and the docs
 ```
 
@@ -133,7 +134,7 @@ manager runs per session. To try it without touching your own directories, point
 unit directory, logs and state follow them (the services still get your real
 environment). Beside a manager that already runs in the session, also set
 `STEWARD_PIPE` to a name of your own (a single name, no path separators), for
-it and for the `stewctl` that talks to it.
+it and for the `stewardctl` that talks to it.
 
 ## Installing it with winpkgs
 
@@ -168,7 +169,7 @@ A system apply installs steward in `C:\Program Files\steward` (on the
 machine PATH) and registers the template; the first manager starts at the
 next sign-in. A later build is installed in place and the running managers
 hand their services to the new one. A home apply that changes the units runs
-`stewctl switch`, so the running manager restarts what changed, starts what
+`stewardctl switch`, so the running manager restarts what changed, starts what
 is new and stops what is gone; a unit you stopped stays stopped.
 
 The system apply also declares the Event Log provisioning task described
@@ -185,7 +186,7 @@ Once, from an administrator prompt:
 ```
 mkdir "C:\Program Files\steward"
 copy steward.exe "C:\Program Files\steward"
-copy stewctl.exe "C:\Program Files\steward"
+copy stewardctl.exe "C:\Program Files\steward"
 sc create steward type= userown start= auto binPath= "\"C:\Program Files\steward\steward.exe\""
 sc failure steward reset= 60 actions= restart/5000/restart/5000/restart/5000
 sc sdset steward D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;IU)(A;;CCLCSWLORC;;;SU)
@@ -294,7 +295,7 @@ again after the restart.
 A `%` in a line is kept in the channel as `％`, the fullwidth percent sign.
 The Event Log renders most events with a `%` in them as empty, in Event
 Viewer and `Get-WinEvent` alike, and doubling it is no escape there, so
-Event Viewer shows `％` where the program wrote `%`; `stewctl logs` prints
+Event Viewer shows `％` where the program wrote `%`; `stewardctl logs` prints
 `%` again.
 
 Terminal escape sequences, such as the colours a program writes, are taken
@@ -342,7 +343,7 @@ Expect one complaint even when it is right. steward carries no resource
 section, having no compiled event templates to put in one, so `wevtutil gp`
 says so and `Get-WinEvent` repeats it as a non-terminating error while
 returning the events and their fields regardless. Nothing is lost by it;
-`stewctl logs` will not go through either of those, and neither does Event
+`stewardctl logs` will not go through either of those, and neither does Event
 Viewer, whose General tab shows the line because the message is carried in
 the record rather than looked up in the provider. The one thing the complaint
 costs you is `Get-WinEvent`'s `Message` property, which reads "Cannot

@@ -1,7 +1,7 @@
 # steward
 
 A per-user service manager for Windows, in the spirit of `systemd --user`.
-`steward` is the manager; `stewctl` is how you talk to it.
+`steward` is the manager; `stewardctl` is how you talk to it.
 
 It exists to run the long-lived programs a Windows desktop depends on -- a
 tiling window manager, a hotkey daemon, a launcher, a tray utility -- and to
@@ -112,7 +112,7 @@ template, but both had the default).
   `graphical-session.target`, which steward reaches when the taskbar window
   (`Shell_TrayWnd`) exists, and tray programs after `tray.target`, reached
   when Explorer broadcasts `TaskbarCreated` (see "When the tray is ready").
-- **The service name is not an address.** It changes every sign-in; `stewctl`
+- **The service name is not an address.** It changes every sign-in; `stewardctl`
   finds the manager through its named pipe.
 - **A manager belongs to a session, not to a user.** Its services run on the
   session's desktop, and cannot move to another. Signing out and straight back
@@ -132,7 +132,7 @@ template, but both had the default).
   lets any interactive user send an instance user-defined controls, so any
   other account signed in to the machine -- at the console or over Remote
   Desktop -- could send another session's manager control 128 and leave that
-  session without restarts, timers or `stewctl` until its next sign-in: a
+  session without restarts, timers or `stewardctl` until its next sign-in: a
   clean stop runs no failure action, so nothing brings a manager back (#11).
   The template is registered with the default descriptor minus that right
   (`CR`) for interactive users and services (`IU`, `SU`) -- winpkgs'
@@ -173,7 +173,7 @@ template, but both had the default).
 3. **The manager restarts services.** `Restart=`, `RestartSec=` with backoff,
    and `StartLimitBurst=`/`StartLimitIntervalSec=`; a service that exhausts its
    limit is `failed`, shown as such, and stays down until started again.
-4. **A stop is deliberate.** A service stopped with `stewctl` stays stopped
+4. **A stop is deliberate.** A service stopped with `stewardctl` stays stopped
    until it is started or the user signs in again; enabled units start at
    every sign-in. A manager's crash or upgrade is neither. So the state file
    also records each unit at rest that ran (or was refused) in this
@@ -261,7 +261,7 @@ where a unit's output goes when it says `StandardOutput=file`, and on a
 machine without the channels, such as one where steward only ever runs in a
 console. Either way the manager's own lines about the unit -- started, exited
 with code N, restarting in 5 s, failed -- go among the output, and
-`stewctl logs` reads both kinds without a manager. The manager's own log,
+`stewardctl logs` reads both kinds without a manager. The manager's own log,
 `steward.log`, is always a file: the log that would explain the channel must
 not depend on it.
 
@@ -289,7 +289,7 @@ makes only the channels of the accounts it was told about.
 `steward-eventlog` holds the names, the provider GUIDs and
 the manifest, because the task and the per-unit shim that writes the events
 have to agree on all three without talking to each other -- and the events'
-own names and fields, because `stewctl logs` reads them back.
+own names and fields, because `stewardctl logs` reads them back.
 
 A unit's output cannot go straight from its handle to a channel the way it
 goes to a file: something has to read the pipe and call `EventWrite`. That
@@ -323,7 +323,7 @@ listening by itself; and if it is not registered, the channel if the
 provisioning task could be started to make it -- which any signed-in user
 may do, and which the manager does then and there rather than wait for the
 logon trigger -- and the file if it could not, because nothing installed
-it. `stewctl` asks the running manager where each unit's output went, and
+it. `stewardctl` asks the running manager where each unit's output went, and
 with no manager reads the unit file and, for a unit that does not say,
 whether the user's channel is registered (its key under `WINEVT\Channels`,
 which any user may read).
@@ -356,10 +356,10 @@ Culture='en-US'` whose message is "The operation completed successfully."
 Every one of them still returns the events and all three fields. So a message
 resource would buy back those consumers' formatting and no data at all, which
 is not worth a `mc.exe` step in a build that cross-compiles on Linux;
-`stewctl logs` reads the fields and never goes near the part that complains.
+`stewardctl logs` reads the fields and never goes near the part that complains.
 
 A `%` in a line goes into the channel as `％`, U+FF05 FULLWIDTH PERCENT SIGN,
-and `stewctl logs` turns it back. The Event Log reads a `%` in a TraceLogging
+and `stewardctl logs` turns it back. The Event Log reads a `%` in a TraceLogging
 string as the start of an insertion when it renders the event: `%%`, `%1` to
 `%99` and a `%` at the very end pass, and anything else -- `100% done`, the
 `%20` of a URL, `%s`, `%n` -- renders the whole event with every field empty,
@@ -370,13 +370,13 @@ and XML, and Event Viewer's General tab shows "The operation completed
 successfully." in place of the message for any line with a `%`, doubled or
 not. The fullwidth sign renders on every path and is one UTF-16 unit, so a
 line's length is unchanged; a fullwidth sign a program wrote itself comes
-back from `stewctl` as `%`.
+back from `stewardctl` as `%`.
 
 Terminal escape sequences are taken out of the output as the shim reads it,
 before it is cut into lines or held. The Event Log keeps them as written,
 and nothing that reads a channel is a terminal: Event Viewer and
 `Get-WinEvent` show `[31mred[0m` where the program meant red, and
-`stewctl logs` would hand them to the reader's terminal, which lets a
+`stewardctl logs` would hand them to the reader's terminal, which lets a
 unit's output retitle the window or write the clipboard. The shim takes out
 ECMA-48's 7-bit forms as a terminal reads them -- control sequences
 (`ESC [` ... final byte), control strings (`ESC ]`, `ESC P` and the like, up
@@ -389,7 +389,7 @@ cut of a line too long for one event, is taken out whole. A unit whose
 output goes to its file keeps them: the unit writes that file itself.
 
 If the shim cannot be started at all, the unit's output falls back to its
-file for that run, and both `steward.log` and `stewctl status` say so. If a
+file for that run, and both `steward.log` and `stewardctl status` say so. If a
 running shim exits with the unit still going -- it crashed, or something
 ended it -- the manager starts another on the same two pipes. It can, because
 it keeps a copy of each read end for exactly this: not to read, only to hand
@@ -439,7 +439,7 @@ own log, `%LOCALAPPDATA%\steward\steward.log`, is renamed to `steward.log.1`
 past the same size; the manager is its only writer, so a rename loses
 nothing.
 
-`stewctl logs [-f] <unit>` reads the files directly, so it works with the
+`stewardctl logs [-f] <unit>` reads the files directly, so it works with the
 manager down; a tail is read from the file's end in chunks, not whole, so a
 large log costs no more than a small one. The price of files over a pipe is
 that service output carries no timestamps of its own.
@@ -492,7 +492,7 @@ What it costs, and what to keep an eye on:
   and nothing is added to: the channel already answers who is responsible,
   by grouping its records on their unit field (the command is under `logs`
   in the documentation), which put 2,367 of one day's 3,025 records on
-  komorebi, 78% of them. A per-unit rate in `stewctl status` would not
+  komorebi, 78% of them. A per-unit rate in `stewardctl status` would not
   answer it more cheaply, since the shim writes to ETW without the lines
   passing through the manager at all: the manager would have to count what
   it is the point of the shim that it never sees. The answer, once the unit
@@ -602,10 +602,10 @@ have.
 ## Control plane
 
 A named pipe, `\\.\pipe\steward-<user SID>-<session>`, whose DACL admits
-only the user and which refuses remote clients; `stewctl` talks to the
+only the user and which refuses remote clients; `stewardctl` talks to the
 manager of the session it runs in. The manager creates its single instance
 with `FILE_FLAG_FIRST_PIPE_INSTANCE`, owned by the user in so many words, and
-reuses it client after client, so the name is never free to take; `stewctl`
+reuses it client after client, so the name is never free to take; `stewardctl`
 opens it at `SecurityIdentification` and, before sending anything, reads the
 pipe's owner and checks that it is the user. The owner comes from the
 creator's token and a standard user can make nobody else the owner of what
@@ -883,8 +883,8 @@ session's. Starting the timer again reads the stamp, so a nightly job that
 fell on a night spent signed out runs at sign-in.
 
 A timer takes a changed definition at once, as a target does, and its next
-elapse follows it; `switch` does not restart it. `stewctl list-timers` shows
-each timer's next and last elapse and what it starts; `stewctl status` of a
+elapse follows it; `switch` does not restart it. `stewardctl list-timers` shows
+each timer's next and last elapse and what it starts; `stewardctl status` of a
 timer shows the same.
 
 ## Nix and winpkgs
@@ -897,7 +897,7 @@ name for its module trees), for a consumer to import. The system sets steward
 up (`services.steward.enable`); a home only declares units, as it would where
 home-manager runs on systemd, and has nothing to enable.
 
-- **`windowsModules.system`** installs `steward.exe` and `stewctl.exe` in a
+- **`windowsModules.system`** installs `steward.exe` and `stewardctl.exe` in a
   fixed directory (`C:\Program Files\steward`), puts it on the machine PATH,
   and declares the template through winpkgs' `windows.services`: `userOwn`,
   started automatically, restarted by the SCM three times 5 s apart,
@@ -925,10 +925,10 @@ home-manager runs on systemd, and has nothing to enable.
   hash, so a changed trigger still changes the file, and `switch`, comparing
   the files key by key, restarts or reloads the unit for it. The module also
   declares a winpkgs activation, triggered by the rendered units, that runs
-  `stewctl switch --if-running` at the end of an apply that changed them --
+  `stewardctl switch --if-running` at the end of an apply that changed them --
   after pruning, so a removed unit's file is gone -- as home-manager runs
   `sd-switch`. `--if-running` makes no manager in the session a success (the
-  next one reads the files as they are), and without `stewctl` on the PATH
+  next one reads the files as they are), and without `stewardctl` on the PATH
   it does nothing, so a home applied before the system is harmless. A
   switch that finds no manager between a crash or a handover and the next
   manager is lost, not made up for. The next manager adopts a changed
@@ -950,7 +950,7 @@ build remaps them.
   `--console` mode with throwaway units: ordering, crash backoff, forking
   services, `KillMode=process`, a stop that needs the kill, and adoption of
   every service by a manager started after the first was killed.
-- **M2** (done) -- control plane and logs: the pipe, `stewctl` verbs,
+- **M2** (done) -- control plane and logs: the pipe, `stewardctl` verbs,
   `switch`, `logs -f`. Exercised against a `--console` manager: queries,
   stop/start/restart, a second manager refused, a unit edited, one added and
   one removed while running, and `daemon-reload` then `switch`.
@@ -961,7 +961,7 @@ build remaps them.
   stewos, a system apply that replaced the running `steward.exe` in place
   (moved aside, the trash emptied once the old manager had handed over) and
   restarted the instance onto it, and a home apply that wrote a unit and ran
-  `stewctl switch`.
+  `stewardctl switch`.
 - **M4** (done) -- the desktop's daemons off Run keys. winpkgs' `programs.whkd`,
   `programs.komorebi` and `programs.masir` gained `service.enable`, declaring
   them as `systemd.user.services` (komorebi.exe directly, stopped with
@@ -973,7 +973,7 @@ build remaps them.
   the bars came up before komorebi listened, failed, and were restarted a
   second later.
 - **M5** (done) -- timers: `*.timer` files, `OnCalendar=` and the relative
-  triggers, `Persistent=`, `stewctl list-timers`, and a home's
+  triggers, `Persistent=`, `stewardctl list-timers`, and a home's
   `systemd.user.timers`. Exercised against a `--console` manager: calendar,
   one-shot and chained timers elapsing, a persistent timer making up a
   night it missed, a sign-in timer due at once, a timer that stops once
@@ -981,7 +981,7 @@ build remaps them.
   made up once), and timers edited and switched without a restart.
 - **M6** (done) -- output to the Event Log: a channel per user created by a
   task at logon (#24), the `steward-cat` shim (#25), the manager's wiring
-  (#26), `stewctl logs` on the channel (#27), and the verification that made
+  (#26), `stewardctl logs` on the channel (#27), and the verification that made
   the channel the default (#28). Exercised on the machine: the first
   sign-in path, re-imports while a unit wrote, throughput, a manager killed
   and handed over mid-write, and programs on a pipe against a file.

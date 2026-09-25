@@ -1,17 +1,18 @@
 +++
-title = "stewctl"
+title = "stewardctl"
 weight = 5
+aliases = ["stewctl"]
 description = "Every command, after systemctl's own: what it does, and what it prints."
 +++
 
-`stewctl` talks to the manager running in the session it is run from, over a
+`stewardctl` talks to the manager running in the session it is run from, over a
 named pipe only you can open. Its verbs follow `systemctl`. A unit name without
 an extension is a service: `whkd` means `whkd.service`, while a target or a
 timer is named in full.
 
 | Command | |
 | --- | --- |
-| [`stewctl`](#list-units) | List the units. The same as `list-units`. |
+| [`stewardctl`](#list-units) | List the units. The same as `list-units`. |
 | [`list-timers`](#list-timers) | The timers: when each next elapses, when it last did, and what it starts. |
 | [`status [UNIT...]`](#status) | The manager, or units in detail with the end of their logs. |
 | [`start UNIT...`](#start-stop-restart) | Start units, and what they want or require. |
@@ -31,16 +32,16 @@ manager; without one it says so and exits 1.
 
 ## list-units
 
-Also `list` or `ls`, and what `stewctl` alone runs.
+Also `list` or `ls`, and what `stewardctl` alone runs.
 
 ```console
-> stewctl
+> stewardctl
 UNIT                STATE              PID  RESTARTS  DESCRIPTION
 crash-loop.service  auto-restart         -         4  Exits with code 3 a second after it starts
 komorebi.service    active           10412         0  Tiling window manager
 whkd.service        active*           9876         0  Hotkey daemon
 
-* changed on disk; restart it (or `stewctl switch`) to use the new definition
+* changed on disk; restart it (or `stewardctl switch`) to use the new definition
 ```
 
 A `*` after the state marks a unit whose file has changed since it started:
@@ -63,7 +64,7 @@ says which).
 ## list-timers
 
 ```console
-> stewctl list-timers
+> stewardctl list-timers
 NEXT                     LEFT          LAST                     PASSED         UNIT          ACTIVATES
 Sun 2026-09-13 14:31:00  in 42s        Sun 2026-09-13 14:30:00  17s ago        hello.timer   hello.service
 Mon 2026-09-14 03:00:00  in 12h 29min  Sun 2026-09-13 03:00:00  11h 30min ago  backup.timer  backup.service
@@ -79,7 +80,7 @@ tray are ready yet, how many units are active, failed and restarting, and where
 the units and logs are.
 
 ```console
-> stewctl status
+> stewardctl status
 steward 0.1.0 (pid 7212, session 1)
    Shell: ready (graphical-session.target reached)
     Tray: ready (tray.target reached)
@@ -91,7 +92,7 @@ steward 0.1.0 (pid 7212, session 1)
 With units, each in detail, then the last ten lines of its log:
 
 ```console
-> stewctl status crash-loop
+> stewardctl status crash-loop
 ○ crash-loop.service - Exits with code 3 a second after it starts
      Loaded: C:\Users\alice\AppData\Roaming\steward\units\crash-loop.service
      Active: auto-restart since 2026-09-13 14:29:55.422 (3s ago)
@@ -113,9 +114,9 @@ file, and the ten lines come from there, read as [`logs`](#logs) reads them.
 ## start, stop, restart
 
 ```console
-stewctl start whkd
-stewctl stop tiling.target
-stewctl restart komorebi whkd
+stewardctl start whkd
+stewardctl stop tiling.target
+stewardctl restart komorebi whkd
 ```
 
 **`start`** starts the units and what they `Wants=` or `Requires=`, in order,
@@ -135,7 +136,7 @@ definition.
 its way up, and then say where each ended:
 
 ```console
-> stewctl restart whkd
+> stewardctl restart whkd
 whkd.service: active
 ```
 
@@ -145,9 +146,9 @@ oneshot does. `--no-block` returns as soon as the manager has the request.
 ## reload
 
 ```console
-stewctl reload notes-sync
-stewctl reload-or-restart notes-sync whkd
-stewctl try-reload-or-restart notes-sync whkd
+stewardctl reload notes-sync
+stewardctl reload-or-restart notes-sync whkd
+stewardctl try-reload-or-restart notes-sync whkd
 ```
 
 **`reload`** runs each unit's `ExecReload=` while it keeps running — see
@@ -163,12 +164,12 @@ does the same but leaves the units at rest alone.
 All three wait, as `restart` does, then say how each ended:
 
 ```console
-> stewctl reload notes-sync
+> stewardctl reload notes-sync
 notes-sync.service: reloading
 notes-sync.service: reloaded
-> stewctl reload other
+> stewardctl reload other
 other.service: reloading
-other.service: reload failed: its command exited with code 3; still active; see stewctl status other.service
+other.service: reload failed: its command exited with code 3; still active; see stewardctl status other.service
 ```
 
 They exit 1 if a reload failed or timed out (after `TimeoutStartSec=`); the
@@ -183,7 +184,7 @@ Prints each unit's state, one per line, and exits 0 if every one of them is
 ## switch
 
 ```console
-stewctl switch
+stewardctl switch
 ```
 
 Reads the unit files and makes what runs match them, as home-manager's
@@ -260,9 +261,9 @@ It used to be `reload` as well; `reload` now reloads units, as in systemctl.
 ## logs
 
 ```console
-stewctl logs whkd           # the last 50 lines
-stewctl logs -n 200 whkd    # the last 200
-stewctl logs -f whkd        # and keep printing what is appended
+stewardctl logs whkd           # the last 50 lines
+stewardctl logs -n 200 whkd    # the last 200
+stewardctl logs -f whkd        # and keep printing what is appended
 ```
 
 A unit's standard output and error go to your Event Log channel where the
@@ -279,8 +280,8 @@ something that stops reading early, like `Select-Object -First 3`, is fine.
 A misspelt unit gets a suggestion:
 
 ```console
-> stewctl logs komorebbi
-stewctl: no unit named komorebbi.service; did you mean komorebi?
+> stewardctl logs komorebbi
+stewardctl: no unit named komorebbi.service; did you mean komorebi?
 ```
 
 In a file, service output carries no timestamps of its own, since it goes
@@ -306,7 +307,7 @@ file: the lines in order, the manager's lines among them marked `-- <time>
 steward:`, and the channel's name first, on standard error.
 
 ```console
-> stewctl logs -n 3 komorebi
+> stewardctl logs -n 3 komorebi
 -- Steward/S-1-5-21-2571842103-1957994488-3489912835-1001 for komorebi.service
 -- 2026-09-14 15:34:43.065 steward: active, main process 4242
 2026-09-14T15:34:43.4104 INFO  komorebi::process_command: processing komorebic start
@@ -378,7 +379,7 @@ account winpkgs manages a home for, or `--account` on the task) made your
 channel then, so you never see this at all.
 
 If the manager cannot start a unit's `steward-cat` at all, that unit's output
-falls back to its log file for the run, and `stewctl status` says so. So does
+falls back to its log file for the run, and `stewardctl status` says so. So does
 a unit whose shim has died five times in a minute; one that dies once is
 replaced on the same pipes, and the channel carries a warning event between
 the two shims' output saying where the gap is. `logs`
@@ -388,8 +389,8 @@ output went for this run rather than trusting the unit file alone.
 ## verify
 
 ```console
-stewctl verify                          # every unit in %APPDATA%\steward\units
-stewctl verify .\backup.timer .\backup.service
+stewardctl verify                          # every unit in %APPDATA%\steward\units
+stewardctl verify .\backup.timer .\backup.service
 ```
 
 Parses unit files and prints every error and warning with its line, without a

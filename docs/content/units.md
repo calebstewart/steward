@@ -26,11 +26,11 @@ is a unit, named after its file: `whkd.service`. That is the XDG config home as
 winpkgs lays it out on Windows, and it is where the [home
 module](@/installation.md#the-home-module) writes them. The directory is read
 when the manager starts; after editing it, run
-[`stewctl switch`](@/stewctl.md#switch) to make what runs match.
+[`stewardctl switch`](@/stewardctl.md#switch) to make what runs match.
 
 A unit is **enabled** by its `[Install]` section — `WantedBy=` a target that
 starts — and there is no `enable` or `disable`: the files are the one source of
-truth. A unit is stopped for the session with `stewctl stop`, and for good by
+truth. A unit is stopped for the session with `stewardctl stop`, and for good by
 removing its file.
 
 ## The syntax
@@ -76,7 +76,7 @@ removing its file.
 
 | Key | Default | |
 | --- | --- | --- |
-| `Description=` | none | Shown by `stewctl` beside the unit's name. |
+| `Description=` | none | Shown by `stewardctl` beside the unit's name. |
 | `Documentation=` | none | A list of URLs. Accepted; informational. |
 | `After=`, `Before=` | none | Ordering only: this unit starts after (before) those that start in the same transaction, and stops in the reverse order. Neither starts anything. |
 | `Wants=` | none | Starting this unit starts those too. Nothing else binds them: they may fail, or be stopped, and this unit runs on. |
@@ -112,7 +112,7 @@ covered with examples on the [Targets](@/targets.md#how-units-relate) page.
 | `WorkingDirectory=` | `%USERPROFILE%` | The directory each command starts in. As written: `%` is not expanded here either. |
 | `Environment=` | | `NAME=value` pairs, space-separated, added to the environment or replacing a variable of the same name (compared without regard to case, as Windows does). |
 | `KillMode=` | `control-group` | Which processes are the service's — see [below](#killmode). |
-| `StandardOutput=` | `eventlog`, where installed | Where its output and error go: `eventlog` (`journal` means the same), your Event Log channel — see [stewctl logs](@/stewctl.md#a-unit-in-the-event-log); or `file`, `%LOCALAPPDATA%\steward\logs\<unit>.log`. Left out, or empty, it is the channel on a machine whose install gives you one, and the file on a machine without the elevated install, such as one where steward only ever runs in a console. Anything else is a warning, treated as `file`. There is no `StandardError=`. |
+| `StandardOutput=` | `eventlog`, where installed | Where its output and error go: `eventlog` (`journal` means the same), your Event Log channel — see [stewardctl logs](@/stewardctl.md#a-unit-in-the-event-log); or `file`, `%LOCALAPPDATA%\steward\logs\<unit>.log`. Left out, or empty, it is the channel on a machine whose install gives you one, and the file on a machine without the elevated install, such as one where steward only ever runs in a console. Anything else is a warning, treated as `file`. There is no `StandardError=`. |
 
 steward's timeouts are shorter than systemd's 90 s because sign-out does not
 wait a minute and a half. Any time can be `infinity`.
@@ -164,7 +164,7 @@ whkd closes every terminal it ever opened.
 
 A unit with no `WantedBy=` is not started at sign-in; something else has to
 start it — another unit's `Wants=` or `Requires=`, a [timer](@/timers.md), or
-`stewctl start`. A target named in `WantedBy=` that has no file is a warning,
+`stewardctl start`. A target named in `WantedBy=` that has no file is a warning,
 as in systemd: nothing can start it.
 
 ## Restarting
@@ -203,7 +203,7 @@ The delay grows exponentially from `RestartSec=` to `RestartMaxDelaySec=` over
 
 That backoff never packs five starts into ten seconds, so a service that keeps
 failing is never refused by the default start limit: it is retried a minute
-apart indefinitely, and `stewctl` shows its restart count. A unit that wants to
+apart indefinitely, and `stewardctl` shows its restart count. A unit that wants to
 give up says so, with a tighter start limit or `Restart=no`.
 
 A service refused by its start limit is `failed`, and stays down until it is
@@ -232,7 +232,7 @@ exception rather than wait on an error-reporting dialog nobody will see.
 ## Reloading
 
 A service that can take new configuration while it runs says how in
-`ExecReload=`: `stewctl reload` runs each command in turn, in the service's
+`ExecReload=`: `stewardctl reload` runs each command in turn, in the service's
 job, and the main process carries on. On Linux the command is usually
 `kill -HUP $MAINPID`; Windows has no signal to send, so a reload is whatever
 the program provides — a `--reload` flag, a command-line client, a message to
@@ -249,15 +249,15 @@ A reload is not a start. The unit stays `active` throughout (its state reads
 `reload` while the commands run); it waits for nothing it is ordered after,
 and counts toward no restart or start limit. A command that fails, unless it
 is prefixed with `-`, ends the reload there: the failure is reported — in the
-unit's log, in `stewctl status`, and by `stewctl reload` exiting 1 — and the
+unit's log, in `stewardctl status`, and by `stewardctl reload` exiting 1 — and the
 service stays up as it was. So does a reload that outlasts
 `TimeoutStartSec=`: its command is terminated. A stop cuts a reload short,
 terminating its command before `ExecStop=`.
 
-Only an active service with `ExecReload=` can be reloaded; `stewctl reload`
+Only an active service with `ExecReload=` can be reloaded; `stewardctl reload`
 refuses anything else. `switch` reloads a unit whose file changed only in
 `ExecReload=` or in home-manager's `X-Reload-Triggers=` — see
-[stewctl switch](@/stewctl.md#switch).
+[stewardctl switch](@/stewardctl.md#switch).
 
 ## Time spans
 
@@ -269,13 +269,13 @@ long spellings.
 ## Checking a unit
 
 ```console
-> stewctl verify
+> stewardctl verify
 C:\Users\alice\AppData\Roaming\steward\units\whkd.service: ok
 C:\Users\alice\AppData\Roaming\steward\units\bar.service:
   line 7: warning: MemoryMax= is not supported in [Service]; ignored
 2 unit(s): 0 with errors, 1 with warnings only
 ```
 
-`stewctl verify` reads every unit in the directory, or the files you name,
+`stewardctl verify` reads every unit in the directory, or the files you name,
 without a manager. A unit with an error does not load at all — the manager
 logs why and runs the rest — so it exits non-zero if any unit has one.

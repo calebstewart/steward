@@ -6,7 +6,7 @@ members = [
     "crates/steward-supervisor",
     "crates/steward-ipc",
     "crates/steward",
-    "crates/stewctl",
+    "crates/stewardctl",
     "crates/steward-cat",
 ]
 

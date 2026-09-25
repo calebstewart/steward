@@ -1,6 +1,6 @@
 # Fails on purpose, a second after every start. Nothing here asks for a
 # restart: the defaults restart a failed service, with a delay that grows from
-# a second to a minute (1 s, 2.3 s, 5.1 s, ...). `stewctl status crash-loop`
+# a second to a minute (1 s, 2.3 s, 5.1 s, ...). `stewardctl status crash-loop`
 # shows the restart count and when the next one is due.
 
 [Unit]

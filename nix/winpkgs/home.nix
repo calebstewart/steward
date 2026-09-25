@@ -17,7 +17,7 @@
 # registers steward (the system module), and importing this module is what
 # makes a home's systemd.user.services steward's units -- as declaring them
 # is all it takes where home-manager runs on systemd. A home that declares
-# none gets no files. An apply that changes them runs `stewctl switch`, as
+# none gets no files. An apply that changes them runs `stewardctl switch`, as
 # home-manager runs sd-switch, so the running manager follows them.
 {
   config,
@@ -47,7 +47,7 @@ let
   };
 
   # home-manager's triggers name store paths, which winpkgs will not write into
-  # a file. All a trigger has to do is change the file: `stewctl switch`
+  # a file. All a trigger has to do is change the file: `stewardctl switch`
   # compares the files key by key, and restarts the unit for a changed
   # X-Restart-Triggers or reloads it for a changed X-Reload-Triggers. Their
   # hash does that.
@@ -95,11 +95,11 @@ in
   ) units;
 
   # Run when the units change -- all of them gone included, so their services
-  # stop. Harmless before steward is: without stewctl on the PATH there is
+  # stop. Harmless before steward is: without stewardctl on the PATH there is
   # nothing to tell, and with no manager in the session (--if-running) the
   # next one reads the files as they are.
   winpkgs.activation.steward = {
-    command = "if (Get-Command stewctl -ErrorAction Ignore) { stewctl switch --if-running }";
+    command = "if (Get-Command stewardctl -ErrorAction Ignore) { stewardctl switch --if-running }";
     triggers = lib.mapAttrsToList (name: unit: {
       inherit name;
       text = render unit;

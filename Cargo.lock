@@ -245,7 +245,7 @@ name = "steward-unit"
 version = "0.1.0"
 
 [[package]]
-name = "stewctl"
+name = "stewardctl"
 version = "0.1.0"
 dependencies = [
  "clap",

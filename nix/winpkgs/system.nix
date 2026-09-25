@@ -1,5 +1,5 @@
 # steward in a winpkgs system configuration: the binaries in a fixed
-# directory, that directory on the machine PATH (stewctl), and the per-user
+# directory, that directory on the machine PATH (stewardctl), and the per-user
 # service template every sign-in starts a manager from.
 #
 # The directory is fixed, not versioned, because a template's instance is a
@@ -77,7 +77,7 @@ in
       type = types.package;
       default = pkgs.callPackage ../package.nix { };
       defaultText = lib.literalMD "steward, built for Windows from this flake";
-      description = "The steward to install: `steward.exe` and `stewctl.exe` in its `bin`.";
+      description = "The steward to install: `steward.exe` and `stewardctl.exe` in its `bin`.";
     };
 
     directory = mkOption {
@@ -87,7 +87,7 @@ in
         Where the binaries live. It is the template's command, and so the
         path every instance runs for as long as its user is signed in: an
         upgrade replaces the files here rather than moving them. On the
-        machine PATH, for `stewctl`.
+        machine PATH, for `stewardctl`.
       '';
     };
 

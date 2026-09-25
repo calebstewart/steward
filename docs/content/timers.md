@@ -153,15 +153,15 @@ whose night was spent signed out runs as soon as you sign in.
 ## Seeing them
 
 ```console
-> stewctl list-timers
+> stewardctl list-timers
 NEXT                     LEFT          LAST                     PASSED         UNIT          ACTIVATES
 Sun 2026-09-13 14:31:00  in 42s        Sun 2026-09-13 14:30:00  17s ago        hello.timer   hello.service
 Mon 2026-09-14 03:00:00  in 12h 29min  Sun 2026-09-13 03:00:00  11h 30min ago  backup.timer  backup.service
 ```
 
-The soonest comes first. `stewctl status backup.timer` shows the same for one
+The soonest comes first. `stewardctl status backup.timer` shows the same for one
 timer, with its state: `waiting` for its next elapse, `running` while what it
 started runs, or `elapsed` once it has nothing left to wait for.
 
 A changed timer takes its new definition as soon as the units are read again,
-and its next elapse follows it; `stewctl switch` does not restart a timer.
+and its next elapse follows it; `stewardctl switch` does not restart a timer.

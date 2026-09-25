@@ -34,12 +34,12 @@ cargo build --release
 cargo test
 ```
 
-The binaries are `target\release\steward.exe` and `target\release\stewctl.exe`.
+The binaries are `target\release\steward.exe` and `target\release\stewardctl.exe`.
 
 With Nix, on Linux or in WSL, cross-compiled for Windows:
 
 ```console
-nix build          # result/bin/steward.exe, result/bin/stewctl.exe
+nix build          # result/bin/steward.exe, result/bin/stewardctl.exe
 nix flake check    # the platform-free crates' tests natively, and the Windows build
 ```
 
@@ -83,8 +83,8 @@ systemd.user.services.whkd = {
 | Option | Default | |
 | --- | --- | --- |
 | `services.steward.enable` | `false` | Install steward and register the per-user service template. |
-| `services.steward.package` | built from this flake | The build to install: `steward.exe` and `stewctl.exe` in its `bin`. |
-| `services.steward.directory` | `C:\Program Files\steward` | Where the binaries live. It is on the machine `PATH`, for `stewctl`. |
+| `services.steward.package` | built from this flake | The build to install: `steward.exe` and `stewardctl.exe` in its `bin`. |
+| `services.steward.directory` | `C:\Program Files\steward` | Where the binaries live. It is on the machine `PATH`, for `stewardctl`. |
 
 The template is registered to start automatically, with failure actions that
 restart a manager 5 s after it dies, up to three times; the count resets after
@@ -113,10 +113,10 @@ way home-manager renders them. The targets steward has built in —
 home-manager declares `tray.target` in every configuration, and on Windows it
 is steward's.
 
-An apply that changes the units runs `stewctl switch --if-running` at the end,
+An apply that changes the units runs `stewardctl switch --if-running` at the end,
 after pruning, so the running manager restarts what changed, starts what is
 new and stops what is gone — while a unit you stopped stays stopped. A home
-applied before the system is harmless: without `stewctl` on the `PATH` the
+applied before the system is harmless: without `stewardctl` on the `PATH` the
 step does nothing, and with no manager running in the session the next one
 reads the files as they are.
 
@@ -134,7 +134,7 @@ change only to `Description=` or `Documentation=` restarts nothing. A unit's
 the unit where it would restart, `keep-old` leaves it running as it was, and
 `restart` and `stop-start` both restart it. So are the older
 `X-ReloadIfChanged=` and `X-RestartIfChanged=`, in `Unit` or `Service`; see
-[stewctl switch](@/stewctl.md#switch). Sockets, paths,
+[stewardctl switch](@/stewardctl.md#switch). Sockets, paths,
 slices and mounts are not steward's, and the module warns about any it is
 given.
 
@@ -146,7 +146,7 @@ Prompt**:
 ```bat
 mkdir "C:\Program Files\steward"
 copy steward.exe "C:\Program Files\steward"
-copy stewctl.exe "C:\Program Files\steward"
+copy stewardctl.exe "C:\Program Files\steward"
 sc create steward type= userown start= auto binPath= "\"C:\Program Files\steward\steward.exe\""
 sc failure steward reset= 60 actions= restart/5000/restart/5000/restart/5000
 sc sdset steward D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;IU)(A;;CCLCSWLORC;;;SU)
@@ -154,7 +154,7 @@ sc sdset steward D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;
 
 The space after each `=` is part of `sc`'s syntax. From PowerShell, spell it
 `sc.exe`, and quote the descriptor: plain `sc` is an alias for `Set-Content`
-there. Add the directory to your `PATH` for `stewctl`.
+there. Add the directory to your `PATH` for `stewardctl`.
 
 The `sc sdset` line is Windows' default descriptor for a service with one
 right taken from interactive users and services: sending user-defined
@@ -164,7 +164,7 @@ without a manager until your next sign-in. Administrators keep the right.
 
 Windows starts an instance named `steward_<suffix>` at every sign-in — so
 **sign out and back in**. The suffix changes at each sign-in; nothing needs to
-know it, since `stewctl` finds the manager through its named pipe.
+know it, since `stewardctl` finds the manager through its named pipe.
 
 > [!WARNING]
 > Anything a unit now runs must no longer be started by a Run key or the
@@ -179,7 +179,7 @@ without stopping them, hand over to the new manager instead:
 ```bat
 sc control steward_<suffix> 128
 copy /y steward.exe "C:\Program Files\steward"
-copy /y stewctl.exe "C:\Program Files\steward"
+copy /y stewardctl.exe "C:\Program Files\steward"
 sc start steward_<suffix>
 ```
 
@@ -212,7 +212,7 @@ locations in that console first:
 | --- | --- |
 | `APPDATA` | The unit directory, `%APPDATA%\steward\units`. |
 | `LOCALAPPDATA` | Logs, the state file and timer stamps, under `%LOCALAPPDATA%\steward`. |
-| `STEWARD_PIPE` | The control pipe's name: a single name, with no `\` or `/` in it. Set it for the manager and for the `stewctl` that talks to it. |
+| `STEWARD_PIPE` | The control pipe's name: a single name, with no `\` or `/` in it. Set it for the manager and for the `stewardctl` that talks to it. |
 
 The services themselves still get your real environment: each is started with
 an environment built fresh from your account, not the manager's.
@@ -225,7 +225,7 @@ and the shell, whkd as a real daemon in a tiling target, and a timer.
 ## Checking it came up
 
 ```console
-> stewctl status
+> stewardctl status
 steward 0.1.0 (pid 7212, session 1)
    Shell: ready (graphical-session.target reached)
     Tray: ready (tray.target reached)
@@ -234,6 +234,6 @@ steward 0.1.0 (pid 7212, session 1)
     Logs: C:\Users\alice\AppData\Local\steward\logs
 ```
 
-If `stewctl` says steward is not running, the manager's own log is
-`%LOCALAPPDATA%\steward\steward.log`, and `stewctl verify` checks your unit
+If `stewardctl` says steward is not running, the manager's own log is
+`%LOCALAPPDATA%\steward\steward.log`, and `stewardctl verify` checks your unit
 files without a manager at all.

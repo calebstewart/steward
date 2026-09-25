@@ -1,4 +1,4 @@
-# steward.exe and stewctl.exe. Called with a Windows package set -- the
+# steward.exe and stewardctl.exe. Called with a Windows package set -- the
 # flake's `packages` use pkgsCross.mingwW64, and inside a winpkgs module `pkgs`
 # already is one -- so the result is Windows binaries built on Linux.
 {
@@ -43,6 +43,6 @@ rustPlatform.buildRustPackage {
     homepage = "https://github.com/calebstewart/steward";
     license = lib.licenses.mit;
     platforms = lib.platforms.windows;
-    mainProgram = "stewctl";
+    mainProgram = "stewardctl";
   };
 }

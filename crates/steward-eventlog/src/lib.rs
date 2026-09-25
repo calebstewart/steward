@@ -47,7 +47,7 @@ pub const CHANNEL_VALUE: u8 = 16;
 /// that the shim does not have to rediscover that.
 pub const CHANNEL_KEYWORD: u64 = 0;
 
-/// The events in a channel, as the shim writes them and `stewctl logs`
+/// The events in a channel, as the shim writes them and `stewardctl logs`
 /// reads them back. Named here so that the writer and the reader cannot
 /// drift apart: the reader filters on [`FIELD_UNIT`] with an XPath and
 /// tells the streams apart by [`FIELD_STREAM`]'s value.
@@ -56,7 +56,7 @@ pub const CHANNEL_KEYWORD: u64 = 0;
 /// [`FIELD_UNIT`], [`FIELD_STREAM`] and [`FIELD_BYTES`], all nul-terminated
 /// UTF-16 strings. [`FIELD_STREAM`] is [`STREAM_STDOUT`] or [`STREAM_STDERR`]
 /// from the shim, and [`STREAM_STEWARD`] for a line the manager writes
-/// about the unit -- started, exited, restarting -- which `stewctl logs`
+/// about the unit -- started, exited, restarting -- which `stewardctl logs`
 /// shows as `-- <time> steward: <line>`, as it shows the manager's lines in
 /// a file. [`EVENT_DROPPED`] says the shim lost output while nobody was
 /// listening: [`FIELD_UNIT`], [`FIELD_STREAM`] and [`FIELD_DROPPED`], the
@@ -80,7 +80,7 @@ pub const STREAM_STDERR: &str = "stderr";
 pub const STREAM_STEWARD: &str = "steward";
 
 /// What a `%` in a line becomes in the channel: U+FF05 FULLWIDTH PERCENT
-/// SIGN, which `stewctl logs` turns back into `%`.
+/// SIGN, which `stewardctl logs` turns back into `%`.
 ///
 /// The Event Log reads a `%` in a TraceLogging string as the start of an
 /// insertion when it renders the event. `%%`, `%1` to `%99` and a `%` at
@@ -93,7 +93,7 @@ pub const STREAM_STEWARD: &str = "steward";
 /// shows comes back empty for any line with a `%` in it, doubled or not.
 /// The fullwidth sign renders on every path, reads as a percent sign in
 /// Event Viewer, and is one UTF-16 unit, so a line's length is unchanged.
-/// A fullwidth sign the program itself wrote comes back from `stewctl` as
+/// A fullwidth sign the program itself wrote comes back from `stewardctl` as
 /// `%` too; that is the one thing this costs.
 pub const PERCENT_STAND_IN: char = '\u{FF05}';
 
@@ -117,7 +117,7 @@ pub fn channel_name(sid: &str) -> String {
 /// `HKEY_LOCAL_MACHINE`: the key exists exactly while the channel is
 /// registered -- an import creates it, `wevtutil um` removes it -- and any
 /// user may read it. So it is how a program that is not an administrator,
-/// the manager or `stewctl`, asks whether the channel is there, without the
+/// the manager or `stewardctl`, asks whether the channel is there, without the
 /// Event Log API and without opening the channel.
 pub fn channel_key(sid: &str) -> String {
     format!(

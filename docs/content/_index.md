@@ -13,11 +13,11 @@ that keeps failing ends in a `failed` state you can see rather than a silent
 give-up.
 
 It is two programs. `steward` is the manager, which Windows starts in your
-session at every sign-in; `stewctl` is the command line you talk to it with.
+session at every sign-in; `stewardctl` is the command line you talk to it with.
 
 If you already know what it is: [Installation](@/installation.md) gets it
 running, [Units](@/units.md) is every key a unit file can use, and
-[stewctl](@/stewctl.md) is every command.
+[stewardctl](@/stewardctl.md) is every command.
 
 ## Why it exists
 
@@ -61,15 +61,15 @@ It starts once Explorer's taskbar exists, restarts if it fails, and stopping
 it leaves the terminals it opened alone. From any shell:
 
 ```console
-> stewctl
+> stewardctl
 UNIT              STATE              PID  RESTARTS  DESCRIPTION
 komorebi.service  active           10412         0  Tiling window manager
 tiling.target     active               -         0  Tiling window management
 whkd.service      active            9876         0  Hotkey daemon
 
-> stewctl status whkd
-> stewctl restart whkd
-> stewctl logs -f whkd
+> stewardctl status whkd
+> stewardctl restart whkd
+> stewardctl logs -f whkd
 ```
 
 ## Features
@@ -99,10 +99,10 @@ whkd.service      active            9876         0  Hotkey daemon
   terminated.
 - **Logs per unit**, with steward's own lines about the unit — started, exited
   with code 3, restarting in 5 s — interleaved into the same file, and readable
-  with `stewctl logs` even when no manager is running.
+  with `stewardctl logs` even when no manager is running.
 - **Declarative with Nix.** Two [winpkgs](https://github.com/calebstewart/winpkgs)
   modules install the manager and turn a home-manager configuration's
-  `systemd.user.services` into steward units; an apply runs `stewctl switch`,
+  `systemd.user.services` into steward units; an apply runs `stewardctl switch`,
   as home-manager runs `sd-switch`.
 
 ## What it does not do
