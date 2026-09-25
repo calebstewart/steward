@@ -3,7 +3,7 @@
 //!
 //! The Event Log keeps them as written, and nothing that reads a channel is
 //! a terminal: Event Viewer and `Get-WinEvent` show the codes as text among
-//! the words, `[31mred[0m`, and `stewctl logs` would hand them to whatever
+//! the words, `[31mred[0m`, and `stewardctl logs` would hand them to whatever
 //! terminal it runs in, which lets a unit's output set the reader's window
 //! title or write their clipboard. So they are taken out as the output is
 //! read, before a line is cut or held, and a line carries its text alone.

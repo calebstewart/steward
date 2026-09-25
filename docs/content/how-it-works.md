@@ -42,7 +42,7 @@ services and never takes another's. Unit files and logs stay per user.
 3. **The manager restarts services**, with `Restart=`, the backoff and the
    start limit. A service that exhausts its limit is `failed`, shown as such,
    and stays down until started again — never a silent give-up.
-4. **A stop is deliberate.** A service stopped with `stewctl` stays stopped
+4. **A stop is deliberate.** A service stopped with `stewardctl` stays stopped
    until it is started or you sign in again. A manager's crash or upgrade is
    neither, so the state file also records each unit at rest and what put it
    there — stopped, finished, failed, or a timer spent — and the manager that
@@ -74,7 +74,7 @@ session.
   output is read by a small `steward-cat` of its own, which writes one event
   per line to your channel. A manager crash or an upgrade leaves it reading,
   so neither breaks a service's output — a program writing into a closed pipe
-  can crash — and `stewctl logs` works with no manager at all. If a shim dies
+  can crash — and `stewardctl logs` works with no manager at all. If a shim dies
   while its unit is still running, the manager starts another on the same
   pipes, within milliseconds and without the unit's writes ever failing; only
   the line the dead one was in the middle of is lost. After five replacements
@@ -91,9 +91,9 @@ session.
 
 ## The control pipe
 
-`stewctl` finds the manager through a named pipe,
+`stewardctl` finds the manager through a named pipe,
 `\\.\pipe\steward-<user SID>-<session>`, whose access list admits only you and
-which refuses remote clients. Before sending anything, `stewctl` checks that
+which refuses remote clients. Before sending anything, `stewardctl` checks that
 the pipe was created by you: its owner is set from the creator's account, and
 nobody but an administrator can make you the owner of what they create. A
 request and its response are one line of JSON each.
@@ -112,7 +112,7 @@ separators in it.
 | --- | --- |
 | `%APPDATA%\steward\units\` | Your units: `*.service`, `*.target`, `*.timer`. |
 | `%LOCALAPPDATA%\steward\steward.log` | The manager's own log, always a file; set aside as `steward.log.1` past 8 MiB. |
-| Event Log channel `Steward/<your SID>` | Each unit's output and steward's lines about it, one event per line, where the install gave you a channel: 128 MiB for all of your units unless the install says otherwise (`services.steward.eventlog.channelSize`), oldest overwritten. A ceiling, not a reservation: the file grows to it and stops. Readable by you, administrators and SYSTEM. Read by `stewctl logs`, Event Viewer or `Get-WinEvent`. |
+| Event Log channel `Steward/<your SID>` | Each unit's output and steward's lines about it, one event per line, where the install gave you a channel: 128 MiB for all of your units unless the install says otherwise (`services.steward.eventlog.channelSize`), oldest overwritten. A ceiling, not a reservation: the file grows to it and stops. Readable by you, administrators and SYSTEM. Read by `stewardctl logs`, Event Viewer or `Get-WinEvent`. |
 | `%LOCALAPPDATA%\steward\logs\<unit>.log` | The same, for a unit that says `StandardOutput=file`, on a machine without the channels, or for a run whose `steward-cat` could not start or kept dying; set aside as `<unit>.log.1` past 8 MiB, at a start or during the run. |
 | `%LOCALAPPDATA%\steward\state-<session>.json` | The session's processes, units at rest, active targets and timer schedules. Removed once a stop of everything completes. |
 | `%LOCALAPPDATA%\steward\timers\<unit>` | When a `Persistent=` timer last elapsed. Per user, so it survives sign-out. |

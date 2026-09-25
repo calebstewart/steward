@@ -36,7 +36,7 @@ const DISPATCH_NAME: &str = "steward";
 ///
 /// Who may send it is the template's security descriptor's to say, and it
 /// matters: a hand-over that no new manager follows leaves the session
-/// without one -- no restarts, no timers, no `stewctl` -- until its next
+/// without one -- no restarts, no timers, no `stewardctl` -- until its next
 /// sign-in, since a clean stop runs none of the SCM's failure actions.
 /// Windows' default descriptor lets every interactive user send a service
 /// user-defined controls, so any other account signed in to the machine could

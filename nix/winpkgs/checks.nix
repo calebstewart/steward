@@ -175,9 +175,11 @@ in
         # The binaries are in the closure, as the directory's one source.
         source=$(jq -r '.resources[] | select(.type == "winpkgs/file" and .properties.target == "C:\\Program Files\\steward") | .properties.source' <<<"$doc")
         test -f "$closure/$source/steward.exe"
-        test -f "$closure/$source/stewctl.exe"
+        test -f "$closure/$source/stewardctl.exe"
+        # Not under its old name, which the unified StewOS command now owns.
+        test ! -e "$closure/$source/stewctl.exe"
 
-        # stewctl is on the machine PATH.
+        # stewardctl is on the machine PATH.
         test "$(jq -r '.resources[] | select(.type == "winpkgs/path") | .properties.dir' <<<"$doc")" = 'C:\Program Files\steward'
 
         # The elevated install also declares the Event Log provisioning task
@@ -262,7 +264,7 @@ in
         # The switch after an apply: last, and again when a unit changes.
         switch() { jq -r --arg f "$2" '.resources[] | select(.id == "Activation steward") | .properties[$f]' <<<"$1"; }
         test "$(jq -r '.resources[-1].id' <<<"$doc")" = 'Activation steward'
-        [[ "$(switch "$doc" command)" == *'stewctl switch --if-running'* ]]
+        [[ "$(switch "$doc" command)" == *'stewardctl switch --if-running'* ]]
         test "$(switch "$doc" revision)" != "$(switch "$changedDoc" revision)"
         touch $out
       '';

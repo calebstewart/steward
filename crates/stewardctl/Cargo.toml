@@ -1,5 +1,5 @@
 [package]
-name = "stewctl"
+name = "stewardctl"
 description = "Control steward, the per-user service manager for Windows"
 version.workspace = true
 edition.workspace = true

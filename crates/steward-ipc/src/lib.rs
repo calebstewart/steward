@@ -1,4 +1,4 @@
-//! How `stewctl` talks to `steward`: one request, one response, each a line
+//! How `stewardctl` talks to `steward`: one request, one response, each a line
 //! of JSON, over the named pipe `\\.\pipe\steward-<user SID>-<session>` (see
 //! [`pipe`]).
 //!
@@ -140,14 +140,14 @@ pub struct UnitStatus {
     pub timer: Option<TimerStatus>,
     /// Set for a unit whose output was to go to the Event Log channel but goes
     /// to its log file for this run instead, and why: its `steward-cat` could
-    /// not be started, or exited with the unit still running. `stewctl` reads
+    /// not be started, or exited with the unit still running. `stewardctl` reads
     /// the file rather than the channel while this is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_fallback: Option<String>,
     /// Where its output goes, [`OUTPUT_EVENTLOG`] or [`OUTPUT_FILE`]: what its
     /// unit file says, or, where it says nothing, what the manager found on
     /// this machine -- the channel if there is one, or if the provisioning
-    /// task could be run to make it, and the file otherwise. `stewctl` reads
+    /// task could be run to make it, and the file otherwise. `stewardctl` reads
     /// this rather than deciding again. Absent from a manager from before the
     /// Event Log was the default, which only ever used what the file said.
     #[serde(default, skip_serializing_if = "Option::is_none")]

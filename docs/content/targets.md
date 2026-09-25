@@ -94,15 +94,15 @@ With komorebi, whkd and the bar all written that way, the whole stack is put
 away for a game and brought back with one command each:
 
 ```console
-stewctl stop tiling.target
-stewctl start tiling.target
+stewardctl stop tiling.target
+stewardctl start tiling.target
 ```
 
 A unit only `WantedBy=` the target, without `PartOf=`, is started with it but
 left running when it stops.
 
 A target's new definition takes effect as soon as the units are read again —
-nothing runs the old one — and `stewctl switch` does not restart a changed
+nothing runs the old one — and `stewardctl switch` does not restart a changed
 target, which would restart its whole group for an edited description.
 
 ## How units relate

@@ -1,6 +1,6 @@
-# A console program that runs until it is asked to stop. `stewctl stop ping`
+# A console program that runs until it is asked to stop. `stewardctl stop ping`
 # sends it Ctrl+C, which ping answers by printing its statistics and exiting;
-# `stewctl logs -f ping` shows its replies as they come.
+# `stewardctl logs -f ping` shows its replies as they come.
 
 [Unit]
 Description=A console program that stops on Ctrl+C

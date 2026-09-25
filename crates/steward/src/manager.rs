@@ -115,7 +115,7 @@ pub enum Control {
     StopAll(String),
     /// Something worth a line in the log.
     Note(String),
-    /// A `stewctl` request, and where its answer goes.
+    /// A `stewardctl` request, and where its answer goes.
     Request(Request, Sender<Response>),
 }
 
@@ -503,7 +503,7 @@ impl Manager {
         }
     }
 
-    // ---- requests from stewctl ------------------------------------------
+    // ---- requests from stewardctl ------------------------------------------
 
     fn answer(&mut self, request: Request) -> Response {
         let units = match &request {
@@ -1795,7 +1795,7 @@ impl Manager {
 
     /// A run whose output goes to the channel begins: its pipes and its
     /// `steward-cat`, or -- if the shim cannot be started -- its file, with
-    /// a word about why in both logs and in `stewctl status`.
+    /// a word about why in both logs and in `stewardctl status`.
     fn open_channel(&mut self, slot: usize) {
         // A unit that says `eventlog` goes to the channel whatever this
         // finds, but it is still what asks the provisioning task to make the

@@ -39,7 +39,7 @@ const FOOTER: &str = r#"    </events>
 ///
 /// Read (0x1) and write (0x2) for the user -- write, because writing an
 /// event to a channel is a right the channel grants and the shim runs as
-/// them; read, because `stewctl logs` does. Not clear (0x4): nothing in
+/// them; read, because `stewardctl logs` does. Not clear (0x4): nothing in
 /// steward clears a channel, and leaving it out keeps a user's own history
 /// from being emptied by anything they run by accident. Administrators get
 /// read, write and clear as they do on every built-in channel, and SYSTEM
@@ -85,7 +85,7 @@ pub fn channel_access(sid: &str) -> String {
 /// different fault with the same symptom. `C:\Program Files\steward`, where
 /// steward installs, settles that one and not the other.
 ///
-/// A reader can sidestep the noise entirely, and `stewctl logs` must. It
+/// A reader can sidestep the noise entirely, and `stewardctl logs` must. It
 /// comes from opening the publisher's metadata to format a message, which
 /// `EvtQuery` and `EvtRender` never do: rendering as XML or as values
 /// returns the full `EventData`, and the right `RenderingInfo` besides. Only

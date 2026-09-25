@@ -1,9 +1,9 @@
 //! Whether the user's Event Log channel exists: the one fact about the
-//! machine that steward and `stewctl` must read alike.
+//! machine that steward and `stewardctl` must read alike.
 //!
 //! A unit that does not say `StandardOutput=` sends its output to the
 //! channel where there is one and to its log file where there is not. The
-//! manager decides that when it starts the unit, and `stewctl` has to reach
+//! manager decides that when it starts the unit, and `stewardctl` has to reach
 //! the same answer when no manager is running to ask, so both ask here.
 
 use std::io;

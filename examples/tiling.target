@@ -1,8 +1,8 @@
 # A group: the tiling window manager's daemons, started and stopped together.
 # Each member says `WantedBy=tiling.target` (starting the target starts it)
 # and `PartOf=tiling.target` (stopping or restarting the target does the same
-# to it). `stewctl stop tiling.target` then puts the whole stack away for a
-# game, and `stewctl start tiling.target` brings it back. whkd.service is a
+# to it). `stewardctl stop tiling.target` then puts the whole stack away for a
+# game, and `stewardctl start tiling.target` brings it back. whkd.service is a
 # member; a unit only wanted by the target would be started with it but left
 # running when it stops.
 

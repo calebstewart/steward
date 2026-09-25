@@ -1,6 +1,6 @@
 [package]
 name = "steward-ipc"
-description = "How stewctl talks to steward: JSON over a named pipe only the user can open"
+description = "How stewardctl talks to steward: JSON over a named pipe only the user can open"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
